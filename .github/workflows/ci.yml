@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Cache downloaded game sources
+        uses: actions/cache@v4
+        with:
+          path: environment_files
+          key: arc-games-${{ hashFiles('Makefile') }}
+
+      - name: Setup (venv, pinned arc-agi, framework @ Kaggle's commit)
+        run: make setup
+
+      - name: Starter smoke test (also downloads ls20 + vc33)
+        run: make verify-local
+
+      - name: Lint + agent/my_agent.py freshly built from agent/core/
+        run: make check
+
+      - name: Interface facts the agent depends on
+        run: make interface
+
+      - name: Smoke regression vs logged champion baseline (process + swarm)
+        run: .venv/bin/python eval/regression_check.py

@@ -1,0 +1,15 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+# agent/my_agent.py is generated (scripts/build_submission.py) — lint agent/core/ instead.
+extend-exclude = ["agent/my_agent.py", "vendor", "reference", "environment_files", ".claude", "experiments/*/my_agent.py", "eval/champion/my_agent.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "C901", "B"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+# Upstream starter-kit file; its sys.path setup must precede the framework imports.
+"scripts/play_local.py" = ["E402"]

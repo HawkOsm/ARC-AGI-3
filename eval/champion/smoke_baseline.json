@@ -1,0 +1,20 @@
+{
+ "score": 1.2847214649720546,
+ "levels": 1.1666666666666667,
+ "per_game": {
+  "ls20": 0.014697236919459141,
+  "vc33": 2.55474569302465
+ },
+ "crashes": 0,
+ "swarm_levels": 3,
+ "first_error": null,
+ "config": {
+  "games": [
+   "ls20",
+   "vc33"
+  ],
+  "reps": 3,
+  "budget": 400,
+  "seed": 12345
+ }
+}
