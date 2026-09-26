@@ -109,20 +109,73 @@ def test_navigator_plans_the_shortest_key_sequence_and_avoids_blocked_moves():
     assert sorted(unreachable) == [2, 2, 3, 3, 3]  # gets as near as it can
 
 
-def test_controls_follow_the_latest_effect_of_each_key():
-    from agent.brain.steer import Controls
-    from agent.brain.scene import LevelScene
+def _scene_with(*objects):
+    from agent.brain.scene import LevelScene, SceneObject
     scene = LevelScene()
-    scene.observations.append(Observation(Action(1), []))  # before a switch: ACTION1 did nothing
-    assert Controls.of(scene, 4) == {}
-    scene.observations.append(Observation(Action(1), [Change(4, "moved", 0, -3)]))  # after it: moves #4 up
-    assert Controls.of(scene, 4) == {1: (-3, 0)}
+    for oid, colour, size in objects:
+        scene.objects.append(SceneObject(oid, colour, size, (0, 0, 2, 2), (3, 3, b"")))
+    return scene
 
 
-def test_controls_ignore_frames_where_the_object_was_reshaped():
-    from agent.brain.steer import Controls
-    from agent.brain.scene import LevelScene
-    scene = LevelScene()
-    scene.observations.append(Observation(Action(3), [Change(4, "moved", 3, 0)]))
-    scene.observations.append(Observation(Action(3), [Change(4, "reshaped")]))  # overlapping the target
-    assert Controls.of(scene, 4) == {3: (0, 3)}
+def test_control_map_learns_selection_modes_and_switches():
+    from agent.brain.control import ControlMap
+    scene = _scene_with((1, 10, 30), (2, 4, 9), (3, 0, 1))  # a line, a block, a one-cell marker
+    controls = ControlMap()
+    assert controls.observe(scene, Observation(Action(3), [Change(1, "moved", -3, 0)])) == "key"
+    assert controls.current == 0
+    # a switch: only the marker jumped (and a composite's parts jumped different ways)
+    assert controls.observe(scene, Observation(Action(5), [Change(3, "moved", 15, 0)])) == "switch"
+    assert controls.current is None
+    controls.observe(scene, Observation(Action(1), [Change(2, "moved", 0, -3)]))
+    assert controls.current == 1 and controls.modes[1].entered_by == [Action(5)]
+    controls.observe(scene, Observation(Action(4), [Change(2, "moved", 3, 0)]))  # same mode, another key
+    assert controls.current == 1 and controls.steps(1, [2]) == {1: (-3, 0), 4: (0, 3)}
+    # clicking the line selects it again: the known mode comes back (same key, same object, same way)
+    controls.observe(scene, Observation(Action(6, 1, 1), [Change(3, "moved", -15, 0)], clicked=1))
+    controls.observe(scene, Observation(Action(3), [Change(1, "moved", -3, 0)]))
+    assert controls.current == 0 and controls.modes[0].clicked == [1] and controls.clicks_select()
+    assert controls.best_mode([2]) == 1
+
+
+def test_a_game_without_selection_has_one_mode():
+    from agent.brain.control import ControlMap
+    scene = _scene_with((1, 4, 9))
+    controls = ControlMap()
+    for key, (dx, dy) in ((1, (0, -1)), (2, (0, 1)), (3, (-1, 0)), (1, (0, -1))):
+        controls.observe(scene, Observation(Action(key), [Change(1, "moved", dx, dy)]))
+    controls.observe(scene, Observation(Action(4), []))  # blocked: nothing moved, nothing learned
+    assert len(controls.modes) == 1 and set(controls.steps(0, [1])) == {1, 2, 3}
+
+
+def test_lessons_report_new_and_changed_objects_and_won_colour_pairs():
+    from agent.brain.control import ControlMap
+    from agent.brain.lessons import GameLessons
+    lessons = GameLessons()
+    level1 = _scene_with((1, 10, 30), (2, 4, 9), (5, 11, 9))
+    c1 = ControlMap()
+    c1.observe(level1, Observation(Action(3), [Change(2, "moved", -3, 0)]))
+    lessons.end_level(0, level1, c1, 20, 2, 5, "identical", {})
+    assert lessons.won_pairs == {(4, 11): 1}
+    assert "brought onto" in lessons.describe_wins()[0]
+    level2 = _scene_with((1, 10, 30), (2, 4, 9), (5, 11, 9), (6, 11, 9), (7, 8, 12))
+    c2 = ControlMap()
+    c2.observe(level2, Observation(Action(3), [Change(1, "moved", -3, 0)]))  # the line moves now
+    news = "\n".join(lessons.news(level2, c2))
+    assert "NEW: #7" in news and "CHANGED: #1" in news and "2 of them" in news
+
+
+def test_goal_board_keeps_reached_goals_and_prefers_won_colours():
+    from agent.brain.goals import GoalBoard
+    t = _tracker()
+    g = _screen(13)
+    g[14:17, 2:5] = 11
+    t.update(0, g, None)
+    scene = t.scene(0)
+    grey = next(o.id for o in scene.objects if o.colour == 4)
+    yellow = next(o.id for o in scene.objects if o.colour == 11)
+    board = GoalBoard()
+    before = board.possible_goals(scene)[0].score
+    board.won_pairs[(4, 11)] = 1
+    assert board.possible_goals(scene)[0].score == 6 * before  # (1 + 2 x won pair) x (1 + won target colour)
+    board.done.append((grey, yellow))
+    assert all(grey not in (c.a, c.b) for c in board.possible_goals(scene))

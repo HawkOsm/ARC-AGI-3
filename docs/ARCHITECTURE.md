@@ -63,6 +63,11 @@ compiler (rules in AGENT.md "Code style").
 | `agent/brain/look.py` | `ScreenReader` (objects, changed blobs), `FirstLook` | perception questions |
 | `agent/brain/learn.py` | the learners, only writers of beliefs: `CounterLearner`, `AvatarLearner`, `TouchLearner`, `ActionLearner`, `DeathJudge` | the agent believes something wrong |
 | `agent/brain/goals.py` | `ScreenFeatures`, `Goals`: goals from what changed when a level was won | goal questions |
+| `agent/brain/scene.py` | `SceneTracker`: numbered objects with ids kept through a level, what each action did to which object; `RelationFinder` (mirror images) | hypothesis mode: "what does it see?" |
+| `agent/brain/shapes.py` | `ShapeRelations`: which objects belong together by shape (same, turned, scaled, fills a gap, fits inside); holes are filled first | why a goal is (not) listed |
+| `agent/brain/control.py` | `ControlMap`: what the keys move right now (control modes), which click / switch key changes it, how to select an object | selection games (ar25) |
+| `agent/brain/lessons.py` | `GameLessons`: how each level was won, which objects are NEW or CHANGED on the next level | "it forgot what it learned" |
+| `agent/brain/steer.py` | `Prober` (level-start probes), `Navigator` (BFS over learned steps), `Steerer` (select the mover, steer it onto the picked goal, find switches) | hypothesis mode: moving things |
 | `agent/brain/decide.py` | `Explorer`: reads beliefs, picks the action (exploration frontier) | the agent does something dumb |
 | `agent/brain/llm.py` | **the LLM advisor**: `Advisor` (HTTP client, shared pause, in-flight limit), `PromptWriter`, `parse_plan` → `Advice(plan, theory)` | LLM questions |
 | `agent/brain/trace.py` | `Tracer`: writes every step (screen, action, who chose it and why, what happened) when `ARC3_TRACE_DIR` is set | "what is it actually doing?" |
@@ -112,6 +117,25 @@ compiler (rules in AGENT.md "Code style").
 Note: ROADMAP.md still says "no LLM-primary agent / LLM as rescue only". When the advisor is on,
 the LLM picks most actions on unsolved levels. That is the owner's 2026-09-26 decision (going
 local LLM after the community research) and must pass the same promotion rule as any change.
+
+## Hypothesis mode (`ARC3_LLM_MODE=hypothesis`) — the brain perceives, the LLM explains, the brain steers
+
+```
+ level starts ─► PROBE   each key once; ACTION5; one click per object kind (colours new to the game first)
+                         a probe that only changed marks = a SWITCH -> one key press shows what it selected
+                 LEARN   ControlMap: which object each key moves in each control mode, what switches modes
+                         a click / switch key doing something never seen in this game = SURPRISE
+                 ASK     object question to the LLM: objects, relations, what actions did, control modes,
+                         NEW / CHANGED objects vs earlier levels, WHAT FINISHED EARLIER LEVELS, the SURPRISE,
+                         goals already reached, and the ranked POSSIBLE GOALS (shape pairs; won colours rank up)
+                         -> LLM answers rule, roles, goal pick, one test action (checked on the next screen)
+                 STEER   select the mover (click / switch key), plan a key path, check every step, replan
+                         arrived + level goes on + more targets like this one -> keep it (DONE), next goal
+                         arrived + nothing like it left -> goal wrong, drop it
+ level won ────► LESSON  what was brought onto what, what the keys controlled -> next level's question + ranking
+```
+
+The LLM is asked every few brain actions, and at once after a surprise; never while steering is under way.
 
 ## Where things are
 

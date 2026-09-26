@@ -24,6 +24,7 @@ import threading
 import time
 import urllib.request
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import NamedTuple
 
 import numpy as np
@@ -87,6 +88,10 @@ OBJECT_SYSTEM_PROMPT = (
     "- Every action counts against the player, so the experiment must be informative.\n"
     "- Base every claim on the evidence given. If an earlier prediction of yours was wrong, change your "
     "explanation.\n\n"
+    "- Levels of one game share their rule: WHAT FINISHED EARLIER LEVELS tells you what the game rewards; a later "
+    "level usually asks for the same thing with more targets, new objects or a new twist. Objects marked NEW or "
+    "CHANGED are that twist: work out what they are for before anything else.\n"
+    "- Often the keys move one selected object; a click or a switch key changes which one (see control modes).\n"
     "- The agent also lists POSSIBLE GOALS: things on screen that belong together by shape (same shape, turned, "
     "scaled, a piece that fills a gap in another) or copies that could be cleared. Pick the number of the one you "
     "believe finishes the level (goal_choice), or 0 if none fits, and say why in goal.\n\n"
@@ -359,6 +364,17 @@ def parse_plan(text: str, available: list[int]) -> list[Action]:
 # ── the question ────────────────────────────────────────────────────────────
 
 
+@dataclass(slots=True)
+class Briefing:
+    """What the brain adds to an object question beyond this screen: lessons from finished levels, new or changed
+    objects, the control modes, goals already reached, and a surprise to explain."""
+    wins: list[str] = field(default_factory=list)
+    news: list[str] = field(default_factory=list)
+    controls: list[str] = field(default_factory=list)
+    done: list[str] = field(default_factory=list)
+    surprise: str = ""
+
+
 class PromptWriter:
     """Writes the question for the advisor from the beliefs and short-term memory (read-only)."""
 
@@ -404,13 +420,21 @@ class PromptWriter:
 
     def object_question(self, scene: LevelScene, relations: list[str], observations: list[Observation],
                         history: list[str], available: list[int], goals: list[GoalCandidate] | None = None,
-                        purposes: list[str] | None = None) -> str:
+                        purposes: list[str] | None = None, briefing: Briefing | None = None) -> str:
         """The question in terms of objects: what is on screen, what the brain noticed, what actions did."""
         m = self.memory
         level = m.level if m.level is not None else 0
         parts = [f"Level {level + 1}. Lives lost so far: {self.stats['deaths']}. "
                  f"Actions in this game: " + ", ".join(f"ACTION{a}" for a in sorted(available) if a != 0) + "."]
+        b = briefing or Briefing()
+        if b.wins:
+            parts.append("WHAT FINISHED EARLIER LEVELS (the strongest evidence; later levels usually keep the rule, "
+                         "with more or new objects):\n" + "\n".join(f"  {w}" for w in b.wins))
         parts.append("Objects on screen now:\n" + "\n".join(f"  {line}" for line in self._object_lines(scene)))
+        if b.news:
+            parts.append("New or changed compared with earlier levels:\n" + "\n".join(f"  {n}" for n in b.news))
+        if b.controls:
+            parts.append("What the keys move (control modes):\n" + "\n".join(f"  {c}" for c in b.controls))
         if relations:
             parts.append("Relations the agent noticed:\n" + "\n".join(f"  {r}" for r in relations))
         if observations:
@@ -420,9 +444,15 @@ class PromptWriter:
             parts.append("No action has been taken on this level yet.")
         if purposes:
             parts.append("How objects have reacted to actions so far:\n" + "\n".join(f"  {p}" for p in purposes))
+        if b.done:
+            parts.append("Already reached on this level (the level did NOT end, so more is needed; keep them):\n"
+                         + "\n".join(f"  {d}" for d in b.done))
         if goals:
             parts.append("POSSIBLE GOALS, most likely first (by shape and by what reacts):\n"
                          + "\n".join(f"  {i}. {g.describe()}" for i, g in enumerate(goals, 1)))
+        if b.surprise:
+            parts.append("SURPRISE - this just happened and is not explained yet:\n  " + b.surprise
+                         + "\n  Explain what it is for; your test should find out what it lets the player do.")
         if history:
             parts.append("Your earlier explanations and how their tests turned out:\n"
                          + "\n".join(f"  {h}" for h in history))

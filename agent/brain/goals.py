@@ -245,18 +245,32 @@ class GoalBoard:
     """The ranked list of possible goals, re-ranked as evidence arrives (hypothesis mode).
 
     score = shape strength x (1 + reacts to our actions) x (1 + 0.5 x LLM picks) x (1 + wins of this relation)
+            x (1 + 2 x levels won by bringing these two colours together) x (1 + levels won on the target colour)
+    A goal reached without finishing the level, while more objects of the target's colour remain, is kept as
+    DONE (one of several targets) and its two objects leave the list.
     """
 
     def __init__(self) -> None:
         self.llm_votes: dict[tuple[str, int, int], int] = {}
         self.won_relations: dict[str, int] = {}  # relation kind -> levels finished while it held
         self.chosen: GoalCandidate | None = None
-        self.roles: dict[int, str] = {}  # object id -> purpose the LLM gave it (kept, shown in later questions)
+        self.roles: dict[int, str] = {}  # object id -> purpose the LLM gave it (this level; shown in questions)
+        self.won_pairs: dict[tuple[int, int], int] = {}  # (mover colour, target colour) -> levels won (lessons)
+        self.done: list[tuple[int, int]] = []  # (mover, target) pairs reached this level; the level goes on
         self._cache_key: frozenset = frozenset()
         self._cache: list[Correspondence] = []
 
+    def new_level(self) -> None:
+        self.chosen, self.roles, self.done = None, {}, []
+        self._cache_key = frozenset()
+
     def possible_goals(self, scene: LevelScene) -> list[GoalCandidate]:
         reacting = Goals.reacting_objects(scene)
+        colour = {o.id: o.colour for o in scene.objects}
+        held = {i for pair in self.done for i in pair}
+        won_targets: dict[int, int] = {}
+        for (_m, t), n in self.won_pairs.items():
+            won_targets[t] = won_targets.get(t, 0) + n
         kinds_now = frozenset((o.colour, o.shape) for o in scene.objects if not o.background)
         if kinds_now != self._cache_key:  # shapes only change when the set of kinds does
             self._cache_key, self._cache = kinds_now, ShapeRelations.find(scene)
@@ -264,13 +278,23 @@ class GoalBoard:
         for c in self._cache:
             if c.relation == "same-colour":
                 continue  # a grouping hint for purposes, too weak on its own to be a goal
+            if c.a in held or c.b in held:
+                continue
             live = c.a in reacting or c.b in reacting
+            if not live and colour.get(c.a) == colour.get(c.b):
+                continue  # two still objects of one colour (two targets): nothing to bring together
             votes = self.llm_votes.get((c.relation, c.a, c.b), 0)
             wins = self.won_relations.get(c.relation, 0)
-            score = c.strength * (2.0 if live else 1.0) * (1 + 0.5 * votes) * (1 + wins)
+            ca, cb = colour.get(c.a, -1), colour.get(c.b, -1)
+            pair_wins = self.won_pairs.get((ca, cb), 0) + self.won_pairs.get((cb, ca), 0)
+            target_wins = won_targets.get(ca, 0) + won_targets.get(cb, 0)
+            score = c.strength * (2.0 if live else 1.0) * (1 + 0.5 * votes) * (1 + wins) \
+                * (1 + 2 * pair_wins) * (1 + target_wins)
             why = c.describe().split(" ", 1)[1].rsplit(" ", 1)[0]
             if live:
                 why += ", and one of them reacts to actions"
+            if pair_wins or target_wins:
+                why += ", and earlier levels were won with these colours"
             candidates.append(GoalCandidate(c.relation, c.a, c.b, score, why))
         copies: dict[tuple, list[SceneObject]] = {}
         for o in scene.objects:

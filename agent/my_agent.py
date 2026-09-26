@@ -1305,6 +1305,22 @@ def mask_of(obj: SceneObject) -> np.ndarray:
     h, w, raw = obj.shape
     return np.frombuffer(raw, dtype=bool).reshape(h, w)
 
+def filled(mask: np.ndarray) -> np.ndarray:
+    """The mask with enclosed holes filled: a piece with dots punched in it has the shape of its outline."""
+    empty = ~mask
+    outside = np.zeros_like(mask)
+    outside[0, :], outside[-1, :], outside[:, 0], outside[:, -1] = (empty[0, :], empty[-1, :], empty[:, 0], empty[:, -1])
+    while True:
+        grown = outside.copy()
+        grown[1:, :] |= outside[:-1, :]
+        grown[:-1, :] |= outside[1:, :]
+        grown[:, 1:] |= outside[:, :-1]
+        grown[:, :-1] |= outside[:, 1:]
+        grown &= empty
+        if (grown == outside).all():
+            return ~outside
+        outside = grown
+
 def turns(mask: np.ndarray) -> list[np.ndarray]:
     """The 8 rotations/reflections of a mask."""
     out = []
@@ -1348,11 +1364,12 @@ class ShapeRelations:
     @staticmethod
     def _relate(a: SceneObject, b: SceneObject, ma: np.ndarray, mb: np.ndarray) -> str | None:
         if a.size > 1 and b.size > 1:
-            if same_mask(ma, mb):
+            fa, fb = (filled(ma), filled(mb))
+            if same_mask(fa, fb):
                 return 'identical' if a.colour != b.colour else None
-            if any((same_mask(t, mb) for t in turns(ma))):
+            if any((same_mask(t, fb) for t in turns(fa))):
                 return 'turned'
-            if ShapeRelations._scaled(ma, mb) or ShapeRelations._scaled(mb, ma):
+            if ShapeRelations._scaled(fa, fb) or ShapeRelations._scaled(fb, fa):
                 return 'scaled'
         if ShapeRelations._fills_gap(ma, mb) or ShapeRelations._fills_gap(mb, ma):
             return 'fills-gap'
@@ -1406,6 +1423,189 @@ class ShapeRelations:
 
 def colour_name(obj: SceneObject) -> str:
     return COLOUR_NAMES[obj.colour]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# agent/brain/control.py
+# ──────────────────────────────────────────────────────────────────────────
+
+MARK_SIZE = 2
+KEYS = (1, 2, 3, 4)
+
+@dataclass(slots=True)
+class ControlMode:
+    steps: dict[int, dict[int, tuple[int, int]]] = field(default_factory=dict)
+    entered_by: list[Action] = field(default_factory=list)
+    clicked: list[int] = field(default_factory=list)
+
+    def keys_for(self, object_id: int) -> dict[int, tuple[int, int]]:
+        return self.steps.get(object_id, {})
+
+class ControlMap:
+    """The level's control modes and switches (per level; written only by `observe`)."""
+
+    def __init__(self) -> None:
+        self.modes: list[ControlMode] = []
+        self.current: int | None = None
+        self.pending: Action | None = None
+        self.pending_click: int | None = None
+        self.switch_ids: set[int] = set()
+        self.dead_clicks: set[int] = set()
+
+    @staticmethod
+    def real_moves(scene: LevelScene, obs: Observation) -> dict[int, tuple[int, int]]:
+        """Objects that really moved: bigger than a mark, and one consistent step (a composite whose parts
+        jumped different ways was re-matched, not moved)."""
+        sizes: dict[int, int] = {}
+        for o in scene.objects:
+            root = scene.root(o.id)
+            sizes[root] = sizes.get(root, 0) + o.size
+        steps: dict[int, set[tuple[int, int]]] = {}
+        for c in obs.changes:
+            if c.kind == 'moved':
+                steps.setdefault(c.object_id, set()).add((c.dy, c.dx))
+        return {i: next(iter(s)) for i, s in steps.items() if len(s) == 1 and sizes.get(i, 0) > MARK_SIZE}
+
+    @staticmethod
+    def is_switch(scene: LevelScene, obs: Observation) -> bool:
+        """Something changed, but no real object moved: a selection (or other state) switch."""
+        return bool(obs.changes) and (not ControlMap.real_moves(scene, obs))
+
+    def observe(self, scene: LevelScene, obs: Observation) -> str:
+        """Learn from one observation; returns "key", "switch" or ""."""
+        action = obs.action
+        moves = self.real_moves(scene, obs)
+        if moves and action[0] in KEYS:
+            index = self._mode_for(action[0], moves)
+            mode = self.modes[index]
+            for obj, step in moves.items():
+                mode.steps.setdefault(obj, {})[action[0]] = step
+            if self.pending is not None:
+                if self.pending not in mode.entered_by:
+                    mode.entered_by.append(self.pending)
+                if self.pending_click is not None and self.pending_click not in mode.clicked:
+                    mode.clicked.append(self.pending_click)
+                self.pending, self.pending_click = (None, None)
+            self.current = index
+            return 'key'
+        if action[0] == 6 and (not obs.changes) and (obs.clicked is not None):
+            self.dead_clicks.add(obs.clicked)
+        if obs.changes and action[0] not in KEYS:
+            self.switch_ids.add(action[0])
+            self.pending, self.pending_click, self.current = (action, obs.clicked, None)
+            return 'switch'
+        return ''
+
+    def _mode_for(self, key: int, moves: dict[int, tuple[int, int]]) -> int:
+        """The mode these moves belong to. With no switch since the last key press it is the current mode (unless
+        a key now moves an object the opposite way); after a switch, a known mode must match exactly - the same
+        key moving the same object the same way, or the same set of objects moving - else it is a new mode."""
+        if self.pending is None and self.current is not None and (not self._conflicts(self.modes[self.current], key, moves)):
+            return self.current
+        best, best_score = (-1, 0)
+        for index, mode in enumerate(self.modes):
+            if self._conflicts(mode, key, moves):
+                continue
+            score = sum((2 for obj in moves if key in mode.keys_for(obj)))
+            if set(moves) == set(mode.steps):
+                score += 2
+            if score > best_score:
+                best, best_score = (index, score)
+        if best >= 0 and best_score >= 2:
+            return best
+        self.modes.append(ControlMode())
+        return len(self.modes) - 1
+
+    @staticmethod
+    def _conflicts(mode: ControlMode, key: int, moves: dict[int, tuple[int, int]]) -> bool:
+        for obj, (dy, dx) in moves.items():
+            known = mode.keys_for(obj).get(key)
+            if known is not None and (_sign(known[0]), _sign(known[1])) != (_sign(dy), _sign(dx)):
+                return True
+        return False
+
+    def best_mode(self, object_ids: list[int]) -> int | None:
+        """The mode in which the keys move one of these objects in the most directions."""
+        best, most = (None, 0)
+        for index, mode in enumerate(self.modes):
+            for obj in object_ids:
+                n = len({(_sign(dy), _sign(dx)) for dy, dx in mode.keys_for(obj).values()})
+                if n > most or (n == most and n and (index == self.current)):
+                    best, most = (index, n)
+        return best
+
+    def steps(self, mode: int, object_ids: list[int]) -> dict[int, tuple[int, int]]:
+        found: dict[int, tuple[int, int]] = {}
+        for obj in object_ids:
+            for key, step in self.modes[mode].keys_for(obj).items():
+                found.setdefault(key, step)
+        return found
+
+    def how_to_enter(self, mode: int, scene: LevelScene, mover: int, available: list[int]) -> Action | None:
+        """The action most likely to make `mode` the current one, in order: click an object whose click led there
+        before; a switch key that led there before; if clicks select what they click, click one of the mode's
+        movers (never one whose click did nothing); any switch key seen (it may cycle through the modes)."""
+        objects = {o.id: o for o in scene.objects if scene.root(o.id) == o.id}
+        target = self.modes[mode]
+        if 6 in available:
+            for obj in target.clicked:
+                if obj in objects:
+                    return click_on(objects[obj])
+        for action in target.entered_by:
+            if action[0] != 6 and action[0] in available:
+                return action
+        if 6 in available and self.clicks_select():
+            for obj in [mover] + sorted(target.steps, key=lambda i: -objects[i].size if i in objects else 0):
+                if obj in objects and obj not in self.dead_clicks and (objects[obj].size > MARK_SIZE):
+                    return click_on(objects[obj])
+        for action_id in sorted(self.switch_ids):
+            if action_id != 6 and action_id in available:
+                return Action(action_id)
+        return None
+
+    def clicks_select(self) -> bool:
+        """Has clicking an object ever made the keys move that very object?"""
+        return any((obj in mode.steps for mode in self.modes for obj in mode.clicked))
+
+    def describe(self, scene: LevelScene) -> list[str]:
+        """For the LLM: what the keys move in each mode, and how each mode was reached."""
+        if not self.modes:
+            return []
+        colour = {o.id: COLOUR_NAMES[o.colour] for o in scene.objects}
+        lines = []
+        if len(self.modes) > 1 or self.switch_ids:
+            lines.append(f'The keys move different things at different times ({len(self.modes)} control mode(s) seen); a switch changed only small marks on screen.')
+        for index, mode in enumerate(self.modes):
+            parts = []
+            for obj, keys in sorted(mode.steps.items()):
+                moves = ', '.join((f'ACTION{k} {_direction(dy, dx)}' for k, (dy, dx) in sorted(keys.items())))
+                parts.append(f"#{obj} ({colour.get(obj, 'gone')}): {moves}")
+            how = [f'clicking #{o}' for o in mode.clicked] + [f'ACTION{a[0]}' for a in mode.entered_by if a[0] != 6]
+            head = f'mode {index + 1}' + (' (NOW)' if index == self.current else '') + (f", reached by {' or '.join(how)}" if how else '')
+            lines.append(f'{head}: ' + '; '.join(parts))
+        if self.clicks_select():
+            lines.append('Clicking an object selects it: the keys then move the clicked object.')
+        return lines
+
+def _sign(v: int) -> int:
+    return (v > 0) - (v < 0)
+
+def _direction(dy: int, dx: int) -> str:
+    parts = []
+    if dy:
+        parts.append(f"{('down' if dy > 0 else 'up')} {abs(dy)}")
+    if dx:
+        parts.append(f"{('right' if dx > 0 else 'left')} {abs(dx)}")
+    return ' '.join(parts) or 'stays'
+
+def click_on(obj: SceneObject) -> Action:
+    """Click a cell of the object itself (a box centre can be empty for an L or a ring)."""
+    mask = mask_of(obj)
+    y0, x0 = (obj.bbox[0], obj.bbox[1])
+    h, w = mask.shape
+    cells = [(abs(y - h // 2) + abs(x - w // 2), y, x) for y in range(h) for x in range(w) if mask[y, x]]
+    _d, y, x = min(cells) if cells else (0, h // 2, w // 2)
+    return Action(6, x0 + x, y0 + y)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1607,6 +1807,9 @@ class GoalBoard:
     """The ranked list of possible goals, re-ranked as evidence arrives (hypothesis mode).
 
     score = shape strength x (1 + reacts to our actions) x (1 + 0.5 x LLM picks) x (1 + wins of this relation)
+            x (1 + 2 x levels won by bringing these two colours together) x (1 + levels won on the target colour)
+    A goal reached without finishing the level, while more objects of the target's colour remain, is kept as
+    DONE (one of several targets) and its two objects leave the list.
     """
 
     def __init__(self) -> None:
@@ -1614,11 +1817,22 @@ class GoalBoard:
         self.won_relations: dict[str, int] = {}
         self.chosen: GoalCandidate | None = None
         self.roles: dict[int, str] = {}
+        self.won_pairs: dict[tuple[int, int], int] = {}
+        self.done: list[tuple[int, int]] = []
         self._cache_key: frozenset = frozenset()
         self._cache: list[Correspondence] = []
 
+    def new_level(self) -> None:
+        self.chosen, self.roles, self.done = (None, {}, [])
+        self._cache_key = frozenset()
+
     def possible_goals(self, scene: LevelScene) -> list[GoalCandidate]:
         reacting = Goals.reacting_objects(scene)
+        colour = {o.id: o.colour for o in scene.objects}
+        held = {i for pair in self.done for i in pair}
+        won_targets: dict[int, int] = {}
+        for (_m, t), n in self.won_pairs.items():
+            won_targets[t] = won_targets.get(t, 0) + n
         kinds_now = frozenset(((o.colour, o.shape) for o in scene.objects if not o.background))
         if kinds_now != self._cache_key:
             self._cache_key, self._cache = (kinds_now, ShapeRelations.find(scene))
@@ -1626,13 +1840,22 @@ class GoalBoard:
         for c in self._cache:
             if c.relation == 'same-colour':
                 continue
+            if c.a in held or c.b in held:
+                continue
             live = c.a in reacting or c.b in reacting
+            if not live and colour.get(c.a) == colour.get(c.b):
+                continue
             votes = self.llm_votes.get((c.relation, c.a, c.b), 0)
             wins = self.won_relations.get(c.relation, 0)
-            score = c.strength * (2.0 if live else 1.0) * (1 + 0.5 * votes) * (1 + wins)
+            ca, cb = (colour.get(c.a, -1), colour.get(c.b, -1))
+            pair_wins = self.won_pairs.get((ca, cb), 0) + self.won_pairs.get((cb, ca), 0)
+            target_wins = won_targets.get(ca, 0) + won_targets.get(cb, 0)
+            score = c.strength * (2.0 if live else 1.0) * (1 + 0.5 * votes) * (1 + wins) * (1 + 2 * pair_wins) * (1 + target_wins)
             why = c.describe().split(' ', 1)[1].rsplit(' ', 1)[0]
             if live:
                 why += ', and one of them reacts to actions'
+            if pair_wins or target_wins:
+                why += ', and earlier levels were won with these colours'
             candidates.append(GoalCandidate(c.relation, c.a, c.b, score, why))
         copies: dict[tuple, list[SceneObject]] = {}
         for o in scene.objects:
@@ -1661,6 +1884,116 @@ class GoalBoard:
                 self.won_relations[c.relation] = self.won_relations.get(c.relation, 0) + 1
         self._cache_key = frozenset()
 MAX_GOAL_CANDIDATES = 8
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# agent/brain/lessons.py
+# ──────────────────────────────────────────────────────────────────────────
+
+MIN_SIZE = 3
+
+@dataclass(slots=True)
+class ColourStory:
+    levels: set[int] = field(default_factory=set)
+    moved_by_keys: bool = False
+    selected_by_click: bool = False
+    roles: set[str] = field(default_factory=set)
+
+@dataclass(slots=True)
+class WinLesson:
+    level: int
+    actions: int
+    mover_colour: int | None
+    target_colour: int | None
+    relation: str
+    controls: list[str]
+
+    def describe(self) -> str:
+        text = f'Level {self.level + 1} was finished after {self.actions} actions'
+        if self.mover_colour is not None and self.target_colour is not None:
+            text += f': the level ended when a {COLOUR_NAMES[self.mover_colour]} object was brought onto a {COLOUR_NAMES[self.target_colour]} object ({self.relation})'
+        if self.controls:
+            text += '. Controls then: ' + ' | '.join(self.controls)
+        return text + '.'
+
+class GameLessons:
+    """Everything learned on finished levels (one per game; written at each level's end)."""
+
+    def __init__(self) -> None:
+        self.colours: dict[int, ColourStory] = {}
+        self.wins: list[WinLesson] = []
+        self.won_pairs: dict[tuple[int, int], int] = {}
+
+    def end_level(self, level: int, scene: LevelScene, controls: ControlMap, actions: int, mover: int | None, target: int | None, relation: str, roles: dict[int, str]) -> WinLesson:
+        colour_of = {o.id: o.colour for o in scene.objects}
+        self._remember_colours(level, scene, controls, roles)
+        mc, tc = (colour_of.get(mover) if mover is not None else None, colour_of.get(target) if target is not None else None)
+        lesson = WinLesson(level, actions, mc, tc, relation, controls.describe(scene)[:4])
+        self.wins.append(lesson)
+        if mc is not None and tc is not None:
+            self.won_pairs[mc, tc] = self.won_pairs.get((mc, tc), 0) + 1
+        return lesson
+
+    def won_targets(self) -> set[int]:
+        return {t for _m, t in self.won_pairs}
+
+    def _remember_colours(self, level: int, scene: LevelScene, controls: ControlMap, roles: dict[int, str]) -> None:
+        now = self.behaviour(scene, controls)
+        for o in scene.objects:
+            if o.background or o.size < MIN_SIZE:
+                continue
+            story = self.colours.setdefault(o.colour, ColourStory())
+            story.levels.add(level)
+            moved, selected = now.get(o.colour, (False, False))
+            story.moved_by_keys |= moved
+            story.selected_by_click |= selected
+            if o.id in roles:
+                story.roles.add(roles[o.id])
+
+    @staticmethod
+    def behaviour(scene: LevelScene, controls: ControlMap) -> dict[int, tuple[bool, bool]]:
+        """colour -> (moved by keys in some mode, selected by clicking it) on this level so far."""
+        colour_of = {o.id: o.colour for o in scene.objects}
+        out: dict[int, tuple[bool, bool]] = {}
+        for mode in controls.modes:
+            for obj in mode.steps:
+                if obj in colour_of:
+                    c = colour_of[obj]
+                    out[c] = (True, out.get(c, (False, False))[1])
+            for obj in mode.clicked:
+                if obj in colour_of:
+                    c = colour_of[obj]
+                    out[c] = (out.get(c, (False, False))[0], True)
+        return out
+
+    def news(self, scene: LevelScene, controls: ControlMap) -> list[str]:
+        """What is new or behaves differently on this level, compared with the finished ones."""
+        if not self.colours:
+            return []
+        now = self.behaviour(scene, controls)
+        by_colour: dict[int, list[int]] = {}
+        for o in scene.objects:
+            if not o.background and o.size >= MIN_SIZE and (scene.root(o.id) == o.id):
+                by_colour.setdefault(o.colour, []).append(o.id)
+        lines = []
+        for colour, ids in sorted(by_colour.items()):
+            name, which = (COLOUR_NAMES[colour], ' '.join((f'#{i}' for i in ids[:6])))
+            story = self.colours.get(colour)
+            if story is None:
+                lines.append(f'NEW: {which} ({name}) - this colour never appeared on earlier levels; find out what it is for')
+                continue
+            moved, selected = now.get(colour, (False, False))
+            if moved and (not story.moved_by_keys):
+                lines.append(f'CHANGED: {which} ({name}) never moved on earlier levels; now the keys move it')
+            if selected and (not story.selected_by_click):
+                lines.append(f'CHANGED: {which} ({name}) can now be selected by clicking it')
+            count_before = len(story.levels)
+            if len(ids) > 1 and count_before:
+                lines.append(f'{which} ({name}): {len(ids)} of them now' + (f"; earlier: {', '.join(sorted(story.roles))}" if story.roles else ''))
+        return lines[:10]
+
+    def describe_wins(self) -> list[str]:
+        return [w.describe() for w in self.wins[-4:]]
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1873,23 +2206,8 @@ Position = tuple[int, int]
 MAX_SEARCH = 5000
 PROBE_CLICKS = 6
 UNLOCK_TRIES = 4
-
-class Controls:
-    """What the keys do to one object, learned from the level's observations (a utility class)."""
-
-    @staticmethod
-    def of(scene: LevelScene, object_id: int) -> dict[int, tuple[int, int]]:
-        """The LATEST effect of each key on the object: what a key controls can change (ar25 level 2: ACTION5 or a
-        click switches the keys from moving the mirror line to moving the shapes)."""
-        latest: dict[int, tuple[int, int]] = {}
-        for obs in scene.observations:
-            if obs.action[0] in (0, 6):
-                continue
-            mine = [c for c in obs.changes if scene.root(c.object_id) == object_id]
-            if any((c.kind != 'moved' for c in mine)):
-                continue
-            latest[obs.action[0]] = (mine[0].dy, mine[0].dx) if mine else (0, 0)
-        return {a: step for a, step in latest.items() if step != (0, 0)}
+MAX_SELECTS = 4
+MAX_STILL = 3
 
 class Navigator:
     """Breadth-first search over positions reachable with the learned steps (a utility class)."""
@@ -1928,28 +2246,42 @@ def _distance(a: Position, b: Position) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 class Prober:
-    """The first actions of a level in hypothesis mode: every key once, then one click per object kind."""
+    """The first actions of a level in hypothesis mode: every key once, then one click per object kind -
+    kinds of a colour that is new on this level first."""
 
     @staticmethod
-    def actions(scene: LevelScene, available: list[int]) -> list[tuple[Action, str]]:
+    def actions(scene: LevelScene, available: list[int], first: set[int] | None=None) -> list[tuple[Action, str]]:
         probes = [(Action(a), f'probe: press ACTION{a} once to see what it moves') for a in sorted(available) if a in (1, 2, 3, 4, 5)]
         if 6 in available:
             kinds: dict[tuple, SceneObject] = {}
             for o in scene.objects:
                 if not o.background and scene.root(o.id) == o.id:
                     kinds.setdefault((o.colour, o.shape), o)
-            for o in sorted(kinds.values(), key=lambda o: -o.size)[:PROBE_CLICKS]:
-                y0, x0, y1, x1 = o.bbox
-                probes.append((Action(6, (x0 + x1) // 2, (y0 + y1) // 2), f'probe: click #{o.id} once to see what it does'))
+            first = first or set()
+            for o in sorted(kinds.values(), key=lambda o: (o.colour not in first, -o.size))[:PROBE_CLICKS]:
+                probes.append((click_on(o), f'probe: click #{o.id} once to see what it does'))
         return probes
 
+    @staticmethod
+    def follow_up(available: list[int], controls: ControlMap) -> tuple[Action, str] | None:
+        """After a switch: one key press shows what the keys move now."""
+        keys = [k for k in (1, 2, 3, 4) if k in available]
+        moving = [k for k in keys if any((k in steps for mode in controls.modes for steps in mode.steps.values()))]
+        if not keys:
+            return None
+        key = (moving or keys)[0]
+        return (Action(key), f'probe: that looked like a switch - press ACTION{key} to see what the keys move now')
+
 class Steerer:
-    """Moves the controlled object of the picked goal onto its partner, one checked step at a time."""
+    """Moves the controlled object of the picked goal onto its partner, one checked step at a time. If the keys
+    move something else right now, it first selects the mover (control.ControlMap.how_to_enter)."""
 
     def __init__(self) -> None:
         self.goal: GoalCandidate | None = None
         self.mover = -1
+        self.mover_key = -1
         self.target = -1
+        self.mode = 0
         self.plan: list[int] = []
         self.expected: Position | None = None
         self.last: tuple[Position, int] | None = None
@@ -1960,6 +2292,8 @@ class Steerer:
         self.stuck = False
         self.unlock_tries = 0
         self.switches_tried: set[Action] = set()
+        self.selects = 0
+        self.still = 0
         self.mover_colour = -1
         self.mover_size = (0, 0)
         self.target_box: tuple[int, int, int, int] | None = None
@@ -1968,25 +2302,31 @@ class Steerer:
         self.goal, self.plan, self.expected, self.last, self.arrived = (None, [], None, None, False)
         self.blocked = set()
         self.stuck = False
+        self.selects, self.still = (0, 0)
 
-    def start(self, goal: GoalCandidate, scene: LevelScene) -> bool:
-        """Pick which of the two objects we can move; True if steering can begin."""
+    def new_level(self) -> None:
+        self.reset()
+        self.failed = set()
+        self.unlock_tries, self.switches_tried = (0, set())
+
+    def start(self, goal: GoalCandidate, scene: LevelScene, controls: ControlMap) -> bool:
+        """Pick which of the two objects the keys can move (in some control mode); True if steering can begin."""
         if goal.relation == 'clear' or goal.key in self.failed:
             return False
+        objects = {o.id: o for o in scene.objects}
         for mover, target in ((goal.a, goal.b), (goal.b, goal.a)):
-            if len(Controls.of(scene, mover)) >= 2:
-                objects = {o.id: o for o in scene.objects}
-                if mover not in objects or target not in objects:
-                    continue
-                self.reset()
-                self.goal, self.mover, self.target = (goal, mover, target)
-                m, t = (objects[mover], objects[target])
-                self.mover_colour, self.mover_size = (m.colour, (m.bbox[2] - m.bbox[0], m.bbox[3] - m.bbox[1]))
-                self.target_box = t.bbox
-                return True
+            mode = controls.best_mode([mover])
+            if mode is None or len(controls.steps(mode, [mover])) < 2 or mover not in objects or (target not in objects):
+                continue
+            self.reset()
+            self.goal, self.mover, self.mover_key, self.target, self.mode = (goal, mover, mover, target, mode)
+            m, t = (objects[mover], objects[target])
+            self.mover_colour, self.mover_size = (m.colour, (m.bbox[2] - m.bbox[0], m.bbox[3] - m.bbox[1]))
+            self.target_box = t.bbox
+            return True
         return False
 
-    def next_action(self, scene: LevelScene, screen: tuple[int, int], available: list[int]) -> Action | None:
+    def next_action(self, scene: LevelScene, screen: tuple[int, int], available: list[int], controls: ControlMap) -> Action | None:
         """The next step toward the goal, or None (arrived, lost the objects, or no way to get closer)."""
         if self.goal is None:
             return None
@@ -1995,20 +2335,24 @@ class Steerer:
             self.note = 'lost sight of the objects; steering stops'
             self.reset()
             return None
-        here = mover.top_left
-        if (mover.bbox[2] - mover.bbox[0], mover.bbox[3] - mover.bbox[1]) != self.mover_size and self.expected is not None and _near(mover.top_left, self.expected, 1 + max(self.mover_size)):
-            here = self.expected
-        if self.last is not None and here == self.last[0]:
-            self.blocked.add(self.last)
-            self.plan = []
-        elif self.expected is not None and here != self.expected:
-            self.plan = []
+        if controls.current is not None and controls.current != self.mode:
+            return self._select(scene, available, controls)
+        here = self._check_last_move(mover, controls)
+        if here is None:
+            return None
         goal_pos = _aligned_box(self.mover_size, self.target_box)
         if here == goal_pos:
             self.arrived = True
             self.note = f'#{self.mover} is on #{self.target}'
             return None
-        steps = {a: s for a, s in Controls.of(scene, self.mover).items() if a in available}
+        ids = [self.mover, self.mover_key]
+        if not self.plan:
+            better = self._mode_with(controls, ids, goal_pos[0] - here[0], goal_pos[1] - here[1])
+            if better is not None and better != self.mode:
+                self.mode = better
+                if controls.current != better:
+                    return self._select(scene, available, controls)
+        steps = {a: s for a, s in controls.steps(self.mode, ids).items() if a in available}
         if any((a not in steps for a in self.plan)):
             self.plan = []
         if not self.plan:
@@ -2028,6 +2372,51 @@ class Steerer:
         self.note = f'steer: move #{self.mover} toward #{self.target} ({len(self.plan) + 1} step(s) planned, {_distance(here, goal_pos)} cells to go)'
         return Action(action)
 
+    def _check_last_move(self, mover: SceneObject, controls: ControlMap) -> Position | None:
+        """Where the mover is, judged against where the last step should have put it; None if steering gives up
+        (key after key moved nothing)."""
+        here = mover.top_left
+        if (mover.bbox[2] - mover.bbox[0], mover.bbox[3] - mover.bbox[1]) != self.mover_size and self.expected is not None and _near(mover.top_left, self.expected, 1 + max(self.mover_size)):
+            here = self.expected
+        if self.last is not None and here == self.last[0] and (controls.current in (None, self.mode)):
+            self.blocked.add(self.last)
+            self.plan = []
+            self.still += 1
+            if self.still >= MAX_STILL:
+                self.note = f'#{self.mover} did not move {self.still} times in a row; steering stops'
+                self.reset()
+                return None
+        elif self.expected is not None and here != self.expected:
+            self.plan = []
+        elif self.expected is not None:
+            self.selects, self.still = (0, 0)
+        return here
+
+    def _select(self, scene: LevelScene, available: list[int], controls: ControlMap) -> Action | None:
+        """The keys move something else right now: select the mover first."""
+        self.plan, self.expected, self.last = ([], None, None)
+        action = controls.how_to_enter(self.mode, scene, self.mover, available) if self.selects < MAX_SELECTS else None
+        if action is None:
+            self.note = f'cannot make the keys move #{self.mover}; steering stops'
+            self.reset()
+            return None
+        self.selects += 1
+        name = f'click at x{action[1]} y{action[2]}' if action[0] == 6 else f'ACTION{action[0]}'
+        self.note = f'select: {name} so that the keys move #{self.mover} (control mode {self.mode + 1})'
+        return action
+
+    @staticmethod
+    def _mode_with(controls: ControlMap, ids: list[int], gap_y: int, gap_x: int) -> int | None:
+        order = list(range(len(controls.modes)))
+        if controls.current is not None:
+            order.remove(controls.current)
+            order.insert(0, controls.current)
+        for index in order:
+            steps = controls.steps(index, ids).values()
+            if (not gap_y or any((dy for dy, _ in steps))) and (not gap_x or any((dx for _, dx in steps))):
+                return index
+        return None
+
     def unlock_probes(self, scene: LevelScene, available: list[int]) -> list[tuple[Action, str]]:
         """Stuck: try ONE thing that might change what the keys control - ACTION5, or clicking an object involved
         (the mover, the target, the mover's mirror partner) - then every key once to relearn them. Steering resumes
@@ -2046,8 +2435,7 @@ class Steerer:
                     partners.update(ids)
             for o in scene.objects:
                 if o.id in partners and scene.root(o.id) == o.id:
-                    y0, x0, y1, x1 = o.bbox
-                    switches.append((Action(6, (x0 + x1) // 2, (y0 + y1) // 2), f'clicking #{o.id}'))
+                    switches.append((click_on(o), f'clicking #{o.id}'))
         for switch, name in switches:
             if switch in self.switches_tried:
                 continue
@@ -2092,7 +2480,7 @@ def _near(a: Position, b: Position, margin: int) -> bool:
 
 SYSTEM_PROMPT = 'You are playing an unknown turn-based puzzle game on a 64x64 grid. Nobody tells you the rules or the goal: you find them out by acting and watching what changes.\n\n- Each cell holds a colour 0-15, written as one hex digit 0-f. Row y goes top (0) to bottom (63), column x left (0) to right (63).\n- ACTION1..ACTION5 are simple inputs (often ACTION1=up, ACTION2=down, ACTION3=left, ACTION4=right, ACTION5=use/select, but check the evidence). ACTION6 x y clicks cell (x, y). ACTION7 is usually undo. Only the listed available actions can be used.\n- A level is won by reaching some goal state; the game then shows the next level. Many games have a step counter or lives shown on screen; running out loses the life and restarts the level.\n- Every action counts against you, including ones that change nothing: finish each level in as FEW actions as possible.\n\nAnswer with exactly one JSON object and nothing else:\n{"theory": "<one or two sentences: what the game is and what you are trying>", "plan": ["ACTION4", "ACTION4", "ACTION6 12 30"]}\nThe plan holds 1 to 8 actions to take next, in order.'
 PLAN_SCHEMA = {'type': 'object', 'properties': {'theory': {'type': 'string', 'maxLength': 400}, 'plan': {'type': 'array', 'minItems': 1, 'maxItems': LLM_PLAN_MAX, 'items': {'type': 'string', 'pattern': '^ACTION[1-7]( [0-9]{1,2} [0-9]{1,2})?$'}}}, 'required': ['theory', 'plan'], 'additionalProperties': False}
-OBJECT_SYSTEM_PROMPT = 'You help an agent play an unknown turn-based puzzle game on a 64x64 grid. Nobody knows the rules or the goal. The agent\'s eyes have split the screen into numbered objects (ids stay the same during a level), noticed some relations between them, and recorded exactly what each action did to which object. Your job is to explain the game in terms of these objects and to propose ONE experiment that tests your explanation.\n\n- ACTION1..ACTION5 are simple inputs (often up, down, left, right, use), ACTION6 x y clicks a cell, ACTION7 is often undo. Only the listed actions exist in this game.\n- Every action counts against the player, so the experiment must be informative.\n- Base every claim on the evidence given. If an earlier prediction of yours was wrong, change your explanation.\n\n- The agent also lists POSSIBLE GOALS: things on screen that belong together by shape (same shape, turned, scaled, a piece that fills a gap in another) or copies that could be cleared. Pick the number of the one you believe finishes the level (goal_choice), or 0 if none fits, and say why in goal.\n\nAnswer with exactly one JSON object:\n{"rule": "<how the game works, in terms of object ids>", "controlled": [ids you believe the player moves], "goal_choice": 1, "goal": "<what must become true to finish the level, in object ids>", "roles": [{"id": 4, "role": "player"}, ...], "test": {"action": "ACTION4", "object": 4, "change": "moved", "direction": "left"}}\ntest.change is what you expect to happen to test.object: moved (give the direction), appeared, disappeared, recoloured, or nothing.'
+OBJECT_SYSTEM_PROMPT = 'You help an agent play an unknown turn-based puzzle game on a 64x64 grid. Nobody knows the rules or the goal. The agent\'s eyes have split the screen into numbered objects (ids stay the same during a level), noticed some relations between them, and recorded exactly what each action did to which object. Your job is to explain the game in terms of these objects and to propose ONE experiment that tests your explanation.\n\n- ACTION1..ACTION5 are simple inputs (often up, down, left, right, use), ACTION6 x y clicks a cell, ACTION7 is often undo. Only the listed actions exist in this game.\n- Every action counts against the player, so the experiment must be informative.\n- Base every claim on the evidence given. If an earlier prediction of yours was wrong, change your explanation.\n\n- Levels of one game share their rule: WHAT FINISHED EARLIER LEVELS tells you what the game rewards; a later level usually asks for the same thing with more targets, new objects or a new twist. Objects marked NEW or CHANGED are that twist: work out what they are for before anything else.\n- Often the keys move one selected object; a click or a switch key changes which one (see control modes).\n- The agent also lists POSSIBLE GOALS: things on screen that belong together by shape (same shape, turned, scaled, a piece that fills a gap in another) or copies that could be cleared. Pick the number of the one you believe finishes the level (goal_choice), or 0 if none fits, and say why in goal.\n\nAnswer with exactly one JSON object:\n{"rule": "<how the game works, in terms of object ids>", "controlled": [ids you believe the player moves], "goal_choice": 1, "goal": "<what must become true to finish the level, in object ids>", "roles": [{"id": 4, "role": "player"}, ...], "test": {"action": "ACTION4", "object": 4, "change": "moved", "direction": "left"}}\ntest.change is what you expect to happen to test.object: moved (give the direction), appeared, disappeared, recoloured, or nothing.'
 ROLES = ['player', 'goal', 'mirror-copy', 'mirror-line', 'wall', 'floor', 'pushable', 'collectible', 'hazard', 'switch', 'indicator', 'background', 'decoration', 'unknown']
 OBJECT_SCHEMA = {'type': 'object', 'properties': {'rule': {'type': 'string', 'maxLength': 400}, 'controlled': {'type': 'array', 'maxItems': 8, 'items': {'type': 'integer'}}, 'goal_choice': {'type': 'integer', 'minimum': 0, 'maximum': 9}, 'goal': {'type': 'string', 'maxLength': 250}, 'roles': {'type': 'array', 'maxItems': 16, 'items': {'type': 'object', 'properties': {'id': {'type': 'integer'}, 'role': {'type': 'string', 'enum': ROLES}}, 'required': ['id', 'role'], 'additionalProperties': False}}, 'test': {'type': 'object', 'properties': {'action': {'type': 'string', 'pattern': '^ACTION[1-7]( [0-9]{1,2} [0-9]{1,2})?$'}, 'object': {'type': 'integer'}, 'change': {'type': 'string', 'enum': ['moved', 'appeared', 'disappeared', 'recoloured', 'nothing']}, 'direction': {'type': 'string', 'enum': ['up', 'down', 'left', 'right', 'none']}}, 'required': ['action', 'object', 'change', 'direction'], 'additionalProperties': False}}, 'required': ['rule', 'controlled', 'goal_choice', 'goal', 'roles', 'test'], 'additionalProperties': False}
 
@@ -2300,6 +2688,16 @@ def parse_plan(text: str, available: list[int]) -> list[Action]:
             plan.append(Action(action_id, -1, -1))
     return plan
 
+@dataclass(slots=True)
+class Briefing:
+    """What the brain adds to an object question beyond this screen: lessons from finished levels, new or changed
+    objects, the control modes, goals already reached, and a surprise to explain."""
+    wins: list[str] = field(default_factory=list)
+    news: list[str] = field(default_factory=list)
+    controls: list[str] = field(default_factory=list)
+    done: list[str] = field(default_factory=list)
+    surprise: str = ''
+
 class PromptWriter:
     """Writes the question for the advisor from the beliefs and short-term memory (read-only)."""
 
@@ -2339,12 +2737,19 @@ class PromptWriter:
         parts.append('Current screen (row number, then 64 hex digits for x=0..63):\n' + self.render_grid(grid))
         return '\n'.join(parts)
 
-    def object_question(self, scene: LevelScene, relations: list[str], observations: list[Observation], history: list[str], available: list[int], goals: list[GoalCandidate] | None=None, purposes: list[str] | None=None) -> str:
+    def object_question(self, scene: LevelScene, relations: list[str], observations: list[Observation], history: list[str], available: list[int], goals: list[GoalCandidate] | None=None, purposes: list[str] | None=None, briefing: Briefing | None=None) -> str:
         """The question in terms of objects: what is on screen, what the brain noticed, what actions did."""
         m = self.memory
         level = m.level if m.level is not None else 0
         parts = [f"Level {level + 1}. Lives lost so far: {self.stats['deaths']}. Actions in this game: " + ', '.join((f'ACTION{a}' for a in sorted(available) if a != 0)) + '.']
+        b = briefing or Briefing()
+        if b.wins:
+            parts.append('WHAT FINISHED EARLIER LEVELS (the strongest evidence; later levels usually keep the rule, with more or new objects):\n' + '\n'.join((f'  {w}' for w in b.wins)))
         parts.append('Objects on screen now:\n' + '\n'.join((f'  {line}' for line in self._object_lines(scene))))
+        if b.news:
+            parts.append('New or changed compared with earlier levels:\n' + '\n'.join((f'  {n}' for n in b.news)))
+        if b.controls:
+            parts.append('What the keys move (control modes):\n' + '\n'.join((f'  {c}' for c in b.controls)))
         if relations:
             parts.append('Relations the agent noticed:\n' + '\n'.join((f'  {r}' for r in relations)))
         if observations:
@@ -2353,8 +2758,12 @@ class PromptWriter:
             parts.append('No action has been taken on this level yet.')
         if purposes:
             parts.append('How objects have reacted to actions so far:\n' + '\n'.join((f'  {p}' for p in purposes)))
+        if b.done:
+            parts.append('Already reached on this level (the level did NOT end, so more is needed; keep them):\n' + '\n'.join((f'  {d}' for d in b.done)))
         if goals:
             parts.append('POSSIBLE GOALS, most likely first (by shape and by what reacts):\n' + '\n'.join((f'  {i}. {g.describe()}' for i, g in enumerate(goals, 1))))
+        if b.surprise:
+            parts.append('SURPRISE - this just happened and is not explained yet:\n  ' + b.surprise + '\n  Explain what it is for; your test should find out what it lets the player do.')
         if history:
             parts.append('Your earlier explanations and how their tests turned out:\n' + '\n'.join((f'  {h}' for h in history)))
         return '\n'.join(parts)
@@ -2511,7 +2920,18 @@ class Brain:
         self.probes: list = []
         self.probed_level: int | None = None
         self.goal_list: list = []
+        self.controls: dict[int, ControlMap] = {}
+        self.lessons = GameLessons()
+        self.goal_board.won_pairs = self.lessons.won_pairs
+        self.effects_seen: set[tuple] = set()
+        self.surprise = ''
+        self.ask_now = False
+        self.level_started_at = 0
         self._traced_verdicts = 0
+        self.memory_available: list[int] = []
+        self.last_why = ''
+        self.steer_stops: dict[tuple, int] = {}
+        self.parked: set[int] = set()
 
     def next_action(self, state: str, frame_layers, levels_completed: int, available: list[int], full_reset: bool=False) -> Action:
         """The whole agent: given the latest frame, return (action_id, x, y)."""
@@ -2568,6 +2988,7 @@ class Brain:
             m.level = level
             m.at_level_start = True
         assert m.level is not None
+        self.memory_available = available
         if self.action_learner.note_available(available):
             self.stats['mode_changes'] += 1
         level_map = self.world.levels.setdefault(m.level, LevelMemory())
@@ -2595,6 +3016,7 @@ class Brain:
         m.screen_before_last_id = m.last_screen_id if m.last_action != RESET_ACTION else None
         m.last_grid, m.last_screen_id = (grid, screen_id)
         m.last_action = action
+        self.last_why = m.why
         return action
 
     def _remember(self, line: str) -> None:
@@ -2620,11 +3042,49 @@ class Brain:
             return
         last = m.last_action if m.last_action != RESET_ACTION else None
         observation = self.scene.update(m.level, grid, last)
+        if observation is not None:
+            self._learn_controls(observation)
         pending = self.lab.pending
         if pending is not None and observation is not None and (observation.action == pending.test_action):
             verdict = Lab.check(pending, observation)
             self.stats['llm_tests_correct' if verdict.startswith('CORRECT') else 'llm_tests_wrong'] += 1
             self.lab.record(verdict)
+
+    def _control_map(self) -> ControlMap:
+        assert self.memory.level is not None
+        return self.controls.setdefault(self.memory.level, ControlMap())
+
+    def _learn_controls(self, observation) -> None:
+        """Feed the control map; a click or switch key that does something never seen before in this game is a
+        SURPRISE: if it only changed marks (a selection?), press one key to see what it produced, then let the LLM
+        explain it and decide what to do next."""
+        assert self.scene is not None and self.memory.level is not None
+        scene = self.scene.scene(self.memory.level)
+        controls = self._control_map()
+        kind = controls.observe(scene, observation)
+        action = observation.action
+        if self.surprise and self.surprise.endswith('then:'):
+            self.surprise += ' ' + observation.describe()
+            self.ask_now = True
+            return
+        if action[0] in (1, 2, 3, 4) or not observation.changes:
+            return
+        probing = self.last_why.startswith('probe:')
+        follow = Prober.follow_up(self.memory_available, controls) if kind == 'switch' and probing else None
+        if follow is not None:
+            self.probes.insert(0, follow)
+        colour_of = {o.id: o.colour for o in scene.objects}
+        what = ('click', colour_of.get(observation.clicked, -1)) if action[0] == 6 else ('key', action[0])
+        signature = (what, kind or 'change')
+        if signature in self.effects_seen:
+            return
+        self.effects_seen.add(signature)
+        self.stats['surprises'] += 1
+        self.surprise = observation.describe()
+        if follow is not None:
+            self.surprise += '; only small marks changed, so the agent pressed a key to see what moves now, then:'
+            return
+        self.ask_now = True
 
     def _experiment(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
         """Hypothesis mode, in order: probe the level (each key once, one click per object kind); steer the
@@ -2635,9 +3095,14 @@ class Brain:
             return None
         scene = self.scene.scene(m.level)
         if self.probed_level != m.level:
-            self.probed_level, self.probes = (m.level, Prober.actions(scene, available))
-            self.steerer.reset()
-            self.steerer.unlock_tries, self.steerer.switches_tried = (0, set())
+            first = {o.colour for o in scene.objects} - set(self.lessons.colours)
+            self.probed_level, self.probes = (m.level, Prober.actions(scene, available, first))
+            self.steerer.new_level()
+        steering = self.steerer.goal is not None and (not self.steerer.stuck)
+        if self.ask_now and (not steering) and (not (self.probes and self.probes[0][1].startswith('probe: that looked like a switch'))):
+            asked = self._ask(scene, grid, available, now=True)
+            if asked is not None:
+                return asked
         while self.probes:
             action, why = self.probes.pop(0)
             if action[0] in available:
@@ -2652,9 +3117,11 @@ class Brain:
     def _steer(self, scene, grid: np.ndarray, available: list[int]) -> Action | None:
         """Follow the steering plan toward the picked goal (no LLM calls while it works)."""
         m, steerer = (self.memory, self.steerer)
+        controls = self._control_map()
         if steerer.goal is None and self.goal_board.chosen is not None:
-            steerer.start(self.goal_board.chosen, scene)
-        action = steerer.next_action(scene, grid.shape, available)
+            steerer.start(self.goal_board.chosen, scene, controls)
+        steering = steerer.goal is not None
+        action = steerer.next_action(scene, grid.shape, available, controls)
         if steerer.stuck and steerer.unlock_tries < UNLOCK_TRIES:
             self.probes = steerer.unlock_probes(scene, available)
             self.stats['unlock_rounds'] += 1
@@ -2662,31 +3129,72 @@ class Brain:
                 probe, why = self.probes.pop(0)
                 m.why, m.route, m.expected_screen = (why, [], None)
                 return probe
-        if steerer.arrived:
+        if steerer.arrived and self._one_of_several(scene):
+            action = None
+        elif steerer.arrived:
             self.stats['goals_given_up'] += 1
             self.lab.history.append(f"the agent moved #{steerer.mover} onto #{steerer.target} and the level did NOT end, so goal '{(steerer.goal.describe() if steerer.goal else '?')}' is wrong")
             steerer.give_up()
             self.goal_board.chosen = None
+        if action is None and steering and (steerer.goal is None) and (self.goal_board.chosen is not None):
+            key = self.goal_board.chosen.key
+            self.steer_stops[key] = self.steer_stops.get(key, 0) + 1
+            if self.steer_stops[key] >= 2:
+                steerer.failed.add(key)
+            self.goal_board.chosen = None
+            self.lab.history.append(f'steering toward the picked goal stopped: {steerer.note}')
+            self.ask_now = True
         if action is None:
             return None
         m.why, m.route, m.expected_screen = (steerer.note, [], None)
         self.stats['steer_actions'] += 1
         return action
 
-    def _ask(self, scene, grid: np.ndarray, available: list[int]) -> Action | None:
-        """Every LLM_ASK_EVERY brain actions: the object question, and the LLM's one test action."""
+    def _one_of_several(self, scene) -> bool:
+        """Arrived, the level goes on, and more objects like the target (its colour, a similar size, not a thin
+        line such as a bar or counter) are still free: keep this pair as DONE (one of several targets) and move on
+        to the next goal - the LLM is asked at once."""
+        steerer, board = (self.steerer, self.goal_board)
+        objects = {o.id: o for o in scene.objects if scene.root(o.id) == o.id}
+        target = objects.get(steerer.target)
+        if target is None:
+            return False
+        held = {i for pair in board.done for i in pair} | {steerer.mover, steerer.target}
+        others = [o.id for o in objects.values() if o.colour == target.colour and (not o.background) and (o.id not in held) and _like_target(o, target)]
+        if not others:
+            return False
+        board.done.append((steerer.mover, steerer.target))
+        self.parked.add(steerer.mover)
+        self.stats['goals_done'] += 1
+        self.lab.history.append(f"the agent moved #{steerer.mover} onto #{steerer.target}; the level did not end, but {' '.join((f'#{i}' for i in others[:6]))} have the same colour as #{target.id}: kept as one of several targets")
+        steerer.reset()
+        following = [g for g in board.possible_goals(scene) if g.key not in steerer.failed and g.relation != 'clear']
+        board.chosen = following[0] if following else None
+        return True
+
+    def _ask(self, scene, grid: np.ndarray, available: list[int], now: bool=False) -> Action | None:
+        """Every LLM_ASK_EVERY brain actions (or at once after a surprise): the object question, and the LLM's
+        one test action."""
         m = self.memory
         adviser = advisor()
-        if adviser is None or m.level is None or self.lab.pending is not None or (self.stats['actions'] < self.lab.next_ask_at):
+        if adviser is None or m.level is None or self.lab.pending is not None or (self.stats['actions'] < self.lab.next_ask_at and (not now)):
             return None
+        controls = self._control_map()
+        briefing = Briefing(self.lessons.describe_wins(), self.lessons.news(scene, controls), controls.describe(scene), [f'#{a} is on #{b}' for a, b in self.goal_board.done], self.surprise)
+        self.surprise, self.ask_now = ('', False)
         wholes = [o for o in scene.objects if scene.root(o.id) == o.id]
         relations = scene.remember_relations(RelationFinder.find(wholes, *grid.shape))
         self.goal_list = [g for g in self.goal_board.possible_goals(scene) if g.key not in self.steerer.failed]
-        question = self.prompt.object_question(scene, relations, list(scene.observations)[-12:], self.lab.history, available, self.goal_list, Goals.purposes(scene, self.goal_board.roles))
+        question = self.prompt.object_question(scene, relations, list(scene.observations)[-12:], self.lab.history, available, self.goal_list, Goals.purposes(scene, self.goal_board.roles), briefing)
         self.stats['llm_questions'] += 1
         hypothesis = adviser.hypothesise(question, available, tag=self.name)
         self.lab.next_ask_at = self.stats['actions'] + LLM_ASK_EVERY
         if hypothesis is None or hypothesis.test_action is None:
+            return None
+        if hypothesis.test_action[0] in (1, 2, 3, 4) and controls.current is not None and self.parked & set(controls.modes[controls.current].steps):
+            self.goal_board.vote(self.goal_list, hypothesis.goal_choice)
+            self.goal_board.roles.update(hypothesis.roles)
+            self.stats['llm_tests_skipped'] += 1
             return None
         self.lab.latest = self.lab.pending = hypothesis
         self.goal_board.vote(self.goal_list, hypothesis.goal_choice)
@@ -2810,8 +3318,7 @@ class Brain:
         if self.lab.pending is not None:
             self.lab.record('the test action FINISHED THE LEVEL')
         if self.scene is not None and m.level is not None:
-            self.goal_board.learn_from_win(self.scene.scene(m.level))
-            self.goal_board.chosen = None
+            self._learn_lesson(self.scene.scene(m.level))
         m.plan = []
         if m.last_action not in (None, RESET_ACTION):
             assert m.last_action is not None
@@ -2833,11 +3340,33 @@ class Brain:
         m.route, m.expected_screen = ([], None)
         m.at_level_start = True
 
+    def _learn_lesson(self, scene) -> None:
+        """The level is won: remember how (for the goal list and the LLM), then start the next level clean."""
+        m, steerer, board = (self.memory, self.steerer, self.goal_board)
+        assert m.level is not None
+        goal = steerer.goal or board.chosen
+        mover, target = (steerer.mover, steerer.target) if steerer.goal is not None else (goal.a, goal.b) if goal is not None and goal.relation != 'clear' else (None, None)
+        lesson = self.lessons.end_level(m.level, scene, self._control_map(), self.stats['actions'] - self.level_started_at, mover, target, goal.relation if goal else '', board.roles)
+        self.stats['lessons'] += 1
+        m.theory = lesson.describe()
+        board.learn_from_win(scene)
+        board.new_level()
+        self.lab.history, self.lab.pending = ([], None)
+        self.lab.next_ask_at = 0
+        self.surprise, self.ask_now = ('', False)
+        self.steer_stops, self.parked = ({}, set())
+        self.level_started_at = self.stats['actions']
+
     def _on_new_play(self) -> None:
         """A full reset happened (back to level 1)."""
         self.memory.plan = []
         self.memory.level = 0
         self.memory.at_level_start = True
+
+def _like_target(o, target) -> bool:
+    """Could `o` be another target of the same kind? Similar size, and a real area (not a 1-cell-wide line)."""
+    h, w = (o.bbox[2] - o.bbox[0] + 1, o.bbox[3] - o.bbox[1] + 1)
+    return min(h, w) >= 2 and 0.4 * target.size <= o.size <= 2.5 * target.size
 
 
 # ──────────────────────────────────────────────────────────────────────────

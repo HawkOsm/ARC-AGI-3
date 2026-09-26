@@ -44,6 +44,23 @@ def mask_of(obj: SceneObject) -> np.ndarray:
     return np.frombuffer(raw, dtype=bool).reshape(h, w)
 
 
+def filled(mask: np.ndarray) -> np.ndarray:
+    """The mask with enclosed holes filled: a piece with dots punched in it has the shape of its outline."""
+    empty = ~mask
+    outside = np.zeros_like(mask)
+    outside[0, :], outside[-1, :], outside[:, 0], outside[:, -1] = empty[0, :], empty[-1, :], empty[:, 0], empty[:, -1]
+    while True:
+        grown = outside.copy()
+        grown[1:, :] |= outside[:-1, :]
+        grown[:-1, :] |= outside[1:, :]
+        grown[:, 1:] |= outside[:, :-1]
+        grown[:, :-1] |= outside[:, 1:]
+        grown &= empty
+        if (grown == outside).all():
+            return ~outside
+        outside = grown
+
+
 def turns(mask: np.ndarray) -> list[np.ndarray]:
     """The 8 rotations/reflections of a mask."""
     out = []
@@ -89,11 +106,12 @@ class ShapeRelations:
     @staticmethod
     def _relate(a: SceneObject, b: SceneObject, ma: np.ndarray, mb: np.ndarray) -> str | None:
         if a.size > 1 and b.size > 1:
-            if same_mask(ma, mb):
+            fa, fb = filled(ma), filled(mb)  # compare outlines: holes (dots, markers) do not change the shape
+            if same_mask(fa, fb):
                 return "identical" if a.colour != b.colour else None  # same colour + shape = copies, one kind
-            if any(same_mask(t, mb) for t in turns(ma)):
+            if any(same_mask(t, fb) for t in turns(fa)):
                 return "turned"
-            if ShapeRelations._scaled(ma, mb) or ShapeRelations._scaled(mb, ma):
+            if ShapeRelations._scaled(fa, fb) or ShapeRelations._scaled(fb, fa):
                 return "scaled"
         if ShapeRelations._fills_gap(ma, mb) or ShapeRelations._fills_gap(mb, ma):
             return "fills-gap"

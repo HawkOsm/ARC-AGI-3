@@ -1,6 +1,6 @@
 """STEER — move a controlled object onto its goal (hypothesis mode, step 2).
 
-    Controls.of(scene, object_id)          what each key did to this object so far: {action_id: (dy, dx)}
+    (what the keys move, and how to select an object first: control.ControlMap)
     Navigator.plan(start, target, ...)     shortest key sequence from one position to (as near as possible) another,
                                            searched over the positions the learned steps can reach
     Prober                                 the level's first actions: each key once, then one click per object kind
@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from collections import deque
 
+from .control import ControlMap, click_on
 from .goals import GoalCandidate
 from .scene import LevelScene, SceneObject
 from .world import Action
@@ -24,24 +25,8 @@ Position = tuple[int, int]
 MAX_SEARCH = 5000  # positions explored per plan
 PROBE_CLICKS = 6  # clicks on distinct object kinds at a level start
 UNLOCK_TRIES = 4  # switches tried per level when a needed direction is missing
-
-
-class Controls:
-    """What the keys do to one object, learned from the level's observations (a utility class)."""
-
-    @staticmethod
-    def of(scene: LevelScene, object_id: int) -> dict[int, tuple[int, int]]:
-        """The LATEST effect of each key on the object: what a key controls can change (ar25 level 2: ACTION5 or a
-        click switches the keys from moving the mirror line to moving the shapes)."""
-        latest: dict[int, tuple[int, int]] = {}
-        for obs in scene.observations:
-            if obs.action[0] in (0, 6):
-                continue
-            mine = [c for c in obs.changes if scene.root(c.object_id) == object_id]
-            if any(c.kind != "moved" for c in mine):
-                continue  # reshaped / hidden / recoloured this time: no evidence about what the key does
-            latest[obs.action[0]] = (mine[0].dy, mine[0].dx) if mine else (0, 0)
-        return {a: step for a, step in latest.items() if step != (0, 0)}
+MAX_SELECTS = 4  # selection attempts in a row (a switch key may cycle through several objects)
+MAX_STILL = 3  # planned key presses in a row that move nothing before steering gives up
 
 
 class Navigator:
@@ -84,10 +69,11 @@ def _distance(a: Position, b: Position) -> int:
 
 
 class Prober:
-    """The first actions of a level in hypothesis mode: every key once, then one click per object kind."""
+    """The first actions of a level in hypothesis mode: every key once, then one click per object kind -
+    kinds of a colour that is new on this level first."""
 
     @staticmethod
-    def actions(scene: LevelScene, available: list[int]) -> list[tuple[Action, str]]:
+    def actions(scene: LevelScene, available: list[int], first: set[int] | None = None) -> list[tuple[Action, str]]:
         probes = [(Action(a), f"probe: press ACTION{a} once to see what it moves") for a in sorted(available)
                   if a in (1, 2, 3, 4, 5)]
         if 6 in available:
@@ -95,20 +81,32 @@ class Prober:
             for o in scene.objects:
                 if not o.background and scene.root(o.id) == o.id:
                     kinds.setdefault((o.colour, o.shape), o)
-            for o in sorted(kinds.values(), key=lambda o: -o.size)[:PROBE_CLICKS]:
-                y0, x0, y1, x1 = o.bbox
-                probes.append((Action(6, (x0 + x1) // 2, (y0 + y1) // 2),
-                               f"probe: click #{o.id} once to see what it does"))
+            first = first or set()
+            for o in sorted(kinds.values(), key=lambda o: (o.colour not in first, -o.size))[:PROBE_CLICKS]:
+                probes.append((click_on(o), f"probe: click #{o.id} once to see what it does"))
         return probes
+
+    @staticmethod
+    def follow_up(available: list[int], controls: ControlMap) -> tuple[Action, str] | None:
+        """After a switch: one key press shows what the keys move now."""
+        keys = [k for k in (1, 2, 3, 4) if k in available]
+        moving = [k for k in keys if any(k in steps for mode in controls.modes for steps in mode.steps.values())]
+        if not keys:
+            return None
+        key = (moving or keys)[0]
+        return Action(key), f"probe: that looked like a switch - press ACTION{key} to see what the keys move now"
 
 
 class Steerer:
-    """Moves the controlled object of the picked goal onto its partner, one checked step at a time."""
+    """Moves the controlled object of the picked goal onto its partner, one checked step at a time. If the keys
+    move something else right now, it first selects the mover (control.ControlMap.how_to_enter)."""
 
     def __init__(self) -> None:
         self.goal: GoalCandidate | None = None
         self.mover = -1
+        self.mover_key = -1  # the mover's id when steering began (the control map knows it by that id)
         self.target = -1
+        self.mode = 0  # the control mode in which the keys move the mover
         self.plan: list[int] = []
         self.expected: Position | None = None
         self.last: tuple[Position, int] | None = None
@@ -119,6 +117,8 @@ class Steerer:
         self.stuck = False  # no known key moves the mover along a needed direction: look for a switch
         self.unlock_tries = 0
         self.switches_tried: set[Action] = set()
+        self.selects = 0  # selection attempts since the mover last moved as planned
+        self.still = 0  # planned key presses in a row that did not move the mover
         # what the mover and target looked like when steering began: while they overlap, both outlines change
         self.mover_colour = -1
         self.mover_size = (0, 0)
@@ -128,25 +128,33 @@ class Steerer:
         self.goal, self.plan, self.expected, self.last, self.arrived = None, [], None, None, False
         self.blocked = set()
         self.stuck = False
+        self.selects, self.still = 0, 0
 
-    def start(self, goal: GoalCandidate, scene: LevelScene) -> bool:
-        """Pick which of the two objects we can move; True if steering can begin."""
+    def new_level(self) -> None:
+        self.reset()
+        self.failed = set()
+        self.unlock_tries, self.switches_tried = 0, set()
+
+    def start(self, goal: GoalCandidate, scene: LevelScene, controls: ControlMap) -> bool:
+        """Pick which of the two objects the keys can move (in some control mode); True if steering can begin."""
         if goal.relation == "clear" or goal.key in self.failed:
             return False
+        objects = {o.id: o for o in scene.objects}
         for mover, target in ((goal.a, goal.b), (goal.b, goal.a)):
-            if len(Controls.of(scene, mover)) >= 2:
-                objects = {o.id: o for o in scene.objects}
-                if mover not in objects or target not in objects:
-                    continue
-                self.reset()
-                self.goal, self.mover, self.target = goal, mover, target
-                m, t = objects[mover], objects[target]
-                self.mover_colour, self.mover_size = m.colour, (m.bbox[2] - m.bbox[0], m.bbox[3] - m.bbox[1])
-                self.target_box = t.bbox
-                return True
+            mode = controls.best_mode([mover])
+            if mode is None or len(controls.steps(mode, [mover])) < 2 or mover not in objects \
+                    or target not in objects:
+                continue
+            self.reset()
+            self.goal, self.mover, self.mover_key, self.target, self.mode = goal, mover, mover, target, mode
+            m, t = objects[mover], objects[target]
+            self.mover_colour, self.mover_size = m.colour, (m.bbox[2] - m.bbox[0], m.bbox[3] - m.bbox[1])
+            self.target_box = t.bbox
+            return True
         return False
 
-    def next_action(self, scene: LevelScene, screen: tuple[int, int], available: list[int]) -> Action | None:
+    def next_action(self, scene: LevelScene, screen: tuple[int, int], available: list[int],
+                    controls: ControlMap) -> Action | None:
         """The next step toward the goal, or None (arrived, lost the objects, or no way to get closer)."""
         if self.goal is None:
             return None
@@ -155,21 +163,24 @@ class Steerer:
             self.note = "lost sight of the objects; steering stops"
             self.reset()
             return None
-        here = mover.top_left
-        if (mover.bbox[2] - mover.bbox[0], mover.bbox[3] - mover.bbox[1]) != self.mover_size \
-                and self.expected is not None and _near(mover.top_left, self.expected, 1 + max(self.mover_size)):
-            here = self.expected  # partly hidden (on or under the target): trust where the move should have put it
-        if self.last is not None and here == self.last[0]:
-            self.blocked.add(self.last)  # it did not move at all: a wall, or the key does something else now
-            self.plan = []
-        elif self.expected is not None and here != self.expected:
-            self.plan = []  # moved, but not as predicted (or touching the target changed its outline): plan again
+        if controls.current is not None and controls.current != self.mode:
+            return self._select(scene, available, controls)
+        here = self._check_last_move(mover, controls)
+        if here is None:
+            return None
         goal_pos = _aligned_box(self.mover_size, self.target_box)
         if here == goal_pos:
             self.arrived = True
             self.note = f"#{self.mover} is on #{self.target}"
             return None
-        steps = {a: s for a, s in Controls.of(scene, self.mover).items() if a in available}
+        ids = [self.mover, self.mover_key]
+        if not self.plan:  # (re)planning: use the mode that moves the mover the needed ways, the current one first
+            better = self._mode_with(controls, ids, goal_pos[0] - here[0], goal_pos[1] - here[1])
+            if better is not None and better != self.mode:
+                self.mode = better
+                if controls.current != better:
+                    return self._select(scene, available, controls)
+        steps = {a: s for a, s in controls.steps(self.mode, ids).items() if a in available}
         if any(a not in steps for a in self.plan):  # what a planned key does has changed since: plan again
             self.plan = []
         if not self.plan:
@@ -192,6 +203,53 @@ class Steerer:
                      f"({len(self.plan) + 1} step(s) planned, {_distance(here, goal_pos)} cells to go)")
         return Action(action)
 
+    def _check_last_move(self, mover: SceneObject, controls: ControlMap) -> Position | None:
+        """Where the mover is, judged against where the last step should have put it; None if steering gives up
+        (key after key moved nothing)."""
+        here = mover.top_left
+        if (mover.bbox[2] - mover.bbox[0], mover.bbox[3] - mover.bbox[1]) != self.mover_size \
+                and self.expected is not None and _near(mover.top_left, self.expected, 1 + max(self.mover_size)):
+            here = self.expected  # partly hidden (on or under the target): trust where the move should have put it
+        if self.last is not None and here == self.last[0] and controls.current in (None, self.mode):
+            self.blocked.add(self.last)  # it did not move at all: a wall, or the key does something else now
+            self.plan = []
+            self.still += 1
+            if self.still >= MAX_STILL:
+                self.note = f"#{self.mover} did not move {self.still} times in a row; steering stops"
+                self.reset()
+                return None
+        elif self.expected is not None and here != self.expected:
+            self.plan = []  # moved, but not as predicted (or touching the target changed its outline): plan again
+        elif self.expected is not None:
+            self.selects, self.still = 0, 0  # moved as planned: the selection is right
+        return here
+
+    def _select(self, scene: LevelScene, available: list[int], controls: ControlMap) -> Action | None:
+        """The keys move something else right now: select the mover first."""
+        self.plan, self.expected, self.last = [], None, None
+        action = controls.how_to_enter(self.mode, scene, self.mover, available) \
+            if self.selects < MAX_SELECTS else None
+        if action is None:
+            self.note = f"cannot make the keys move #{self.mover}; steering stops"
+            self.reset()
+            return None
+        self.selects += 1
+        name = f"click at x{action[1]} y{action[2]}" if action[0] == 6 else f"ACTION{action[0]}"
+        self.note = f"select: {name} so that the keys move #{self.mover} (control mode {self.mode + 1})"
+        return action
+
+    @staticmethod
+    def _mode_with(controls: ControlMap, ids: list[int], gap_y: int, gap_x: int) -> int | None:
+        order = list(range(len(controls.modes)))
+        if controls.current is not None:
+            order.remove(controls.current)
+            order.insert(0, controls.current)
+        for index in order:
+            steps = controls.steps(index, ids).values()
+            if (not gap_y or any(dy for dy, _ in steps)) and (not gap_x or any(dx for _, dx in steps)):
+                return index
+        return None
+
     def unlock_probes(self, scene: LevelScene, available: list[int]) -> list[tuple[Action, str]]:
         """Stuck: try ONE thing that might change what the keys control - ACTION5, or clicking an object involved
         (the mover, the target, the mover's mirror partner) - then every key once to relearn them. Steering resumes
@@ -210,8 +268,7 @@ class Steerer:
                     partners.update(ids)
             for o in scene.objects:
                 if o.id in partners and scene.root(o.id) == o.id:
-                    y0, x0, y1, x1 = o.bbox
-                    switches.append((Action(6, (x0 + x1) // 2, (y0 + y1) // 2), f"clicking #{o.id}"))
+                    switches.append((click_on(o), f"clicking #{o.id}"))
         for switch, name in switches:
             if switch in self.switches_tried:
                 continue

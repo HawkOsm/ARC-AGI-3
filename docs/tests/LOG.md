@@ -4,6 +4,34 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-26 — Step 3: control modes (selection), level lessons, surprises → LLM, several targets
+- Change: `agent/brain/control.py` `ControlMap` — control modes (which object each key moves), switches (a click /
+  ACTION5 that changed something; the next key press shows the mode), how to select an object (click it if clicks
+  select, else the switch key); `agent/brain/lessons.py` `GameLessons` — how each level was won (mover colour →
+  target colour, controls), NEW / CHANGED objects vs earlier levels; object question gets WHAT FINISHED EARLIER
+  LEVELS, news, control modes, goals already reached, SURPRISE; a click / switch doing something never seen in the
+  game → one key press to see what it produced, then the LLM is asked at once (owner: "when a click does something new
+  the LLM should decide"); a probe switch always gets that key press; steering selects its mover first; arriving
+  while more target-like objects of the target's colour remain = DONE (kept, next goal); an LLM test that would move a
+  placed piece is skipped; shapes compared with holes filled (ar25's dotted pieces vs solid outlines); goal list
+  won-colour boosts; `Controls` removed. Fixes found in the debug runs: endless key presses after a no-op select,
+  arrow keys counted as switches, marker changes read as a 21-cell jump (click not seen as a switch), bottom bar and
+  step counter counted as "more targets", LLM tests interrupting steering.
+- Command: `eval/debug_run.py ar25 --hypothesis --steps 300 --trace` (7 runs); then
+  `ARC3_LLM_MODE=hypothesis eval/run.py --swarm --max-actions 200 --seed 0 --label hyp3_local_200` (local Qwen3.5-4B).
+- Result: ar25 debug (last run): level 1 in 26 actions, level 2 in 35, level 3 not solved (the L piece's outline lies
+  across the mirror line: the mirror must move first). 25 games, 200 actions, one run each:
+  **step 3 0.519 / 9 levels** vs step 2 0.690 / 11 vs brain 0.251 / 6. Per game: sc25 2→0 levels, vc33 2→1, lp85
+  2.78→0.06, bp35 0→1, r11l 0.11→0.85; ar25 level 1 took 50 actions in the swarm run vs 26 in the debug run (same
+  code). In both LLM runs 110–130 of the 200 actions are the brain's fallback exploration.
+- Verdict: INCONCLUSIVE — one run per arm with a sampling LLM; more runs of both arms queued.
+
+## 2026-09-26 — Step 2 on all 25 games (hypothesis mode, local 4B, 200 actions)
+- Command: `ARC3_LLM_MODE=hypothesis eval/run.py --swarm --max-actions 200 --seed 0 --label hyp_local_200`
+- Result: **0.690 / 11 levels** vs brain alone 0.251 / 6 (`brain_swarm_200`). Gains: ar25 0→2 levels, sc25 0→2,
+  tn36 0→1, vc33 1→2, lp85 0.10→2.78; losses: bp35 1→0, m0r0 4.76→0.93, lf52 0.31→0.13. 0 errors, 1493 s wall.
+- Verdict: INFO — one run; first sign the object pipeline beats the brain outside ar25.
+
 ## 2026-09-26 — Step 2: probes, steering toward the picked goal, switch discovery — ar25 levels 1 and 2 solved
 - Change: `agent/brain/steer.py`: `Prober` (level start: each key once, one click per object kind — owner's "click
   to explore"); `Controls` (latest effect of each key on an object; frames where it was reshaped/hidden are no
