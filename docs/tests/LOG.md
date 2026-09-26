@@ -21,6 +21,10 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
   tn36 clicked one inert object 10 times (level 1 ~80 actions vs 26–29). Step 5's: a wrong prediction asked again at
   once, giving runs of 3–4 LLM clicks (tn36 0 levels). lp85 differences are the explorer picking the left or right
   rotate button (luck), not these changes.
+- Step 5b, three runs: 0.728 / 0.511 / 0.632 (11 / 7 / 9 levels), mean 0.624 — the same as step 3 (0.606), below
+  step 2 (0.697). First run was lucky (cn04 won a level for the first time, 4.76). Step 2 is also the most consistent
+  per game (sc25 2/2/2 levels, vc33 2/2/2, tn36 1/1/1; step 5b sc25 2/0/1, tn36 1/1/0). Note: in step 2 every LLM
+  click test was dropped (the missing-coordinates bug), so on click-only games step 2 = probes + the brain's explorer.
 - Verdict: NO GAIN — nothing after step 2 beats it on the 25-game score (run-to-run spread about ±0.1). The
   mechanisms work where they apply (ar25 selection, click tests with object names, event reasons in the replay);
   on the aggregate the LLM's own actions cost more than they find.
