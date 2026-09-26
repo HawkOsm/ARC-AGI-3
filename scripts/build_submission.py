@@ -115,7 +115,9 @@ def main() -> int:
     compile(src, args.out, "exec")
     out = Path(args.out)
     if args.check:
-        if not out.exists() or out.read_text() != src:
+        # Compare the parsed code, not the text: ast.unparse formats some f-strings differently across
+        # Python 3.12 patch releases (GitHub CI's system 3.12 vs the local 3.12.13), which is not staleness.
+        if not out.exists() or ast.dump(ast.parse(out.read_text())) != ast.dump(ast.parse(src)):
             print(f"STALE: {out} does not match agent/brain/ — run scripts/build_submission.py")
             return 1
         print(f"OK: {out} is up to date")
