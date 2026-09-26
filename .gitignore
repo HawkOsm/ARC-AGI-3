@@ -7,7 +7,8 @@ __pycache__/
 *.pyc
 
 # Vendored framework + downloaded game source + agent recordings
-vendor/
+vendor/*
+!vendor/duck/
 environment_files/
 recordings/
 logs.log
