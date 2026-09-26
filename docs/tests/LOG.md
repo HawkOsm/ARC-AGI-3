@@ -4,6 +4,22 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-26 — Step 2: probes, steering toward the picked goal, switch discovery — ar25 levels 1 and 2 solved
+- Change: `agent/brain/steer.py`: `Prober` (level start: each key once, one click per object kind — owner's "click
+  to explore"); `Controls` (latest effect of each key on an object; frames where it was reshaped/hidden are no
+  evidence); `Navigator` (BFS over positions the learned steps reach, around blocked moves, nearest reachable if not
+  exact); `Steerer` (follows the plan to put the mover's centre on the target's, checks each move, replans; when a
+  whole direction is missing it tries ONE switch at a time — ACTION5 or clicking the objects involved — then re-tests
+  the keys; gives the goal up if arriving does not finish the level). LLM roles kept as object purposes in later
+  questions. No LLM calls while steering.
+- Command: `eval/debug_run.py ar25 --hypothesis --steps 200 --trace` (6 runs while fixing: a KeyError when a key's
+  effect changed mid-plan; false "blocked" + 45 wasted unlock moves; lost tracking when the L overlaps the target).
+- Result (final run): **ar25 level 1 in 27 actions (human baseline 32) and level 2 in 26 (baseline 50)** — both
+  capped at 115 per level; 0 lives lost; level 3 not solved by step 200. Level 2 needed the switch: the keys moved the
+  mirror line until ACTION5 (or clicking the black shape — confirmed by hand in the engine) made ACTION1/2 move the
+  shapes; the steerer found it by itself. The brain alone never finished ar25 level 1 (0 levels in every run).
+- Verdict: INFO — first game solved by the object/goal/steer pipeline; not yet measured on the other 24 games.
+
 ## 2026-09-26 — Goals as a ranked list of shape correspondences; the LLM picks (local 4B, ar25)
 - Change: owner's direction — goals come from object purposes and shapes, not a list of genres. `shapes.py`: pairwise
   correspondences between object kinds (identical / turned or flipped / scaled / fills a gap / fits inside / same

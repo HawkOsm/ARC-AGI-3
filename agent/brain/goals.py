@@ -184,8 +184,8 @@ class Goals:
                 f"distance {Goals.distance(boxes[goal.a], boxes[goal.b]):.1f} cells")
 
     @staticmethod
-    def purposes(scene: LevelScene) -> list[str]:
-        """What each reacting object seems to be for, from how it responded to actions."""
+    def purposes(scene: LevelScene, roles: dict[int, str] | None = None) -> list[str]:
+        """What each object seems to be for: how it responded to actions, and the purpose the LLM gave it."""
         moves: dict[int, dict[str, set[str]]] = {}
         for obs in scene.observations:
             a = obs.action
@@ -196,11 +196,16 @@ class Goals:
                     moves.setdefault(c.object_id, {}).setdefault(name, set()).add(d)
                 elif c.kind in ("recoloured", "disappeared"):
                     moves.setdefault(c.object_id, {}).setdefault(name, set()).add(c.kind)
+        roles = roles or {}
+        visible = {o.id for o in scene.objects}
         lines = []
-        for oid, by_action in sorted(moves.items()):
-            parts = [f"{act} -> {'/'.join(sorted(ds))}" for act, ds in sorted(by_action.items())]
-            lines.append(f"#{oid}: " + ", ".join(parts))
-        return lines[:12]
+        for oid in sorted(set(moves) | {i for i in roles if i in visible}):
+            parts = [f"{act} -> {'/'.join(sorted(ds))}" for act, ds in sorted(moves.get(oid, {}).items())]
+            text = ", ".join(parts) if parts else "never reacted to any action"
+            if oid in roles:
+                text += f"; you called it: {roles[oid]}"
+            lines.append(f"#{oid}: {text}")
+        return lines[:14]
 
     def _is_just_moving(self, name: tuple) -> bool:
         """Changes that only say 'the avatar is somewhere else' are not goals: the avatar's
@@ -246,6 +251,7 @@ class GoalBoard:
         self.llm_votes: dict[tuple[str, int, int], int] = {}
         self.won_relations: dict[str, int] = {}  # relation kind -> levels finished while it held
         self.chosen: GoalCandidate | None = None
+        self.roles: dict[int, str] = {}  # object id -> purpose the LLM gave it (kept, shown in later questions)
         self._cache_key: frozenset = frozenset()
         self._cache: list[Correspondence] = []
 

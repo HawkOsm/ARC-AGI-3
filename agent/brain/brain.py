@@ -25,6 +25,7 @@ from .learn import ActionLearner, AvatarLearner, CounterLearner, DeathJudge, Tou
 from .llm import Lab, PromptWriter, advisor
 from .look import FirstLook, ScreenReader
 from .scene import RelationFinder, SceneTracker
+from .steer import UNLOCK_TRIES, Prober, Steerer
 from .settings import LLM_ASK_EVERY, LLM_MODE, LLM_RECENT_STEPS
 from .trace import Tracer
 from .world import (
@@ -67,6 +68,9 @@ class Brain:
         self.scene = SceneTracker(self.world) if self.mode == "hypothesis" else None
         self.lab = Lab()
         self.goal_board = GoalBoard()
+        self.steerer = Steerer()
+        self.probes: list = []  # the level's probe actions still to take
+        self.probed_level: int | None = None
         self.goal_list: list = []  # the last list of possible goals shown to the LLM (for debug output)
         self._traced_verdicts = 0
 
@@ -197,18 +201,66 @@ class Brain:
             self.lab.record(verdict)
 
     def _experiment(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
-        """Hypothesis mode: every LLM_ASK_EVERY brain actions, ask the object question and run its test action."""
+        """Hypothesis mode, in order: probe the level (each key once, one click per object kind); steer the
+        controlled object onto the picked goal; otherwise every LLM_ASK_EVERY brain actions ask the object
+        question and run its test action."""
         m = self.memory
-        adviser = advisor()
-        if adviser is None or self.scene is None or m.level is None or level_map.has_solution \
-                or self.lab.pending is not None or self.stats["actions"] < self.lab.next_ask_at:
+        if advisor() is None or self.scene is None or m.level is None or level_map.has_solution:
             return None
         scene = self.scene.scene(m.level)
+        if self.probed_level != m.level:  # a new level: probe first
+            self.probed_level, self.probes = m.level, Prober.actions(scene, available)
+            self.steerer.reset()
+            self.steerer.unlock_tries, self.steerer.switches_tried = 0, set()
+        while self.probes:
+            action, why = self.probes.pop(0)
+            if action[0] in available:
+                m.why, m.route, m.expected_screen = why, [], None
+                self.stats["probes"] += 1
+                return action
+        steered = self._steer(scene, grid, available)
+        if steered is not None:
+            return steered
+        return self._ask(scene, grid, available)
+
+    def _steer(self, scene, grid: np.ndarray, available: list[int]) -> Action | None:
+        """Follow the steering plan toward the picked goal (no LLM calls while it works)."""
+        m, steerer = self.memory, self.steerer
+        if steerer.goal is None and self.goal_board.chosen is not None:
+            steerer.start(self.goal_board.chosen, scene)
+        action = steerer.next_action(scene, grid.shape, available)
+        if steerer.stuck and steerer.unlock_tries < UNLOCK_TRIES:  # look for a switch, then steer again
+            self.probes = steerer.unlock_probes(scene, available)
+            self.stats["unlock_rounds"] += 1
+            if self.probes:
+                probe, why = self.probes.pop(0)
+                m.why, m.route, m.expected_screen = why, [], None
+                return probe
+        if steerer.arrived:  # on the target and the level has not ended (a win would be a new level): wrong goal
+            self.stats["goals_given_up"] += 1
+            self.lab.history.append(f"the agent moved #{steerer.mover} onto #{steerer.target} and the level did NOT "
+                                    f"end, so goal '{steerer.goal.describe() if steerer.goal else '?'}' is wrong")
+            steerer.give_up()
+            self.goal_board.chosen = None
+        if action is None:
+            return None
+        m.why, m.route, m.expected_screen = steerer.note, [], None
+        self.stats["steer_actions"] += 1
+        return action
+
+    def _ask(self, scene, grid: np.ndarray, available: list[int]) -> Action | None:
+        """Every LLM_ASK_EVERY brain actions: the object question, and the LLM's one test action."""
+        m = self.memory
+        adviser = advisor()
+        if adviser is None or m.level is None or self.lab.pending is not None \
+                or self.stats["actions"] < self.lab.next_ask_at:
+            return None
         wholes = [o for o in scene.objects if scene.root(o.id) == o.id]
         relations = scene.remember_relations(RelationFinder.find(wholes, *grid.shape))
-        self.goal_list = self.goal_board.possible_goals(scene)
+        self.goal_list = [g for g in self.goal_board.possible_goals(scene) if g.key not in self.steerer.failed]
         question = self.prompt.object_question(scene, relations, list(scene.observations)[-12:], self.lab.history,
-                                               available, self.goal_list, Goals.purposes(scene))
+                                               available, self.goal_list,
+                                               Goals.purposes(scene, self.goal_board.roles))
         self.stats["llm_questions"] += 1
         hypothesis = adviser.hypothesise(question, available, tag=self.name)
         self.lab.next_ask_at = self.stats["actions"] + LLM_ASK_EVERY
@@ -216,6 +268,7 @@ class Brain:
             return None
         self.lab.latest = self.lab.pending = hypothesis
         self.goal_board.vote(self.goal_list, hypothesis.goal_choice)
+        self.goal_board.roles.update(hypothesis.roles)
         chosen = self.goal_board.chosen.describe() if self.goal_board.chosen else hypothesis.goal
         m.theory = f"{hypothesis.rule} | goal: {chosen} | controlled: {hypothesis.controlled}"
         m.why = f"LLM test: expects {hypothesis.prediction()}"

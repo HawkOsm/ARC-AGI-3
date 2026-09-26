@@ -95,3 +95,34 @@ def test_goal_board_ranks_same_shape_pair_first_and_follows_llm_votes():
     board.vote(goals, 1)
     assert board.chosen is goals[0]
     assert board.possible_goals(t.scene(0))[0].score > goals[0].score  # the pick moved it up
+
+
+def test_navigator_plans_the_shortest_key_sequence_and_avoids_blocked_moves():
+    from agent.brain.steer import Navigator
+    steps = {1: (-3, 0), 2: (3, 0), 3: (0, 3), 4: (0, -3)}
+    plan = Navigator.plan((0, 0), (6, 9), steps, (3, 3), (20, 20), set())
+    assert sorted(plan) == [2, 2, 3, 3, 3]
+    blocked = {((0, 0), 2)}  # can't go down from the start: go right first
+    plan = Navigator.plan((0, 0), (6, 9), steps, (3, 3), (20, 20), blocked)
+    assert plan[0] == 3 and sorted(plan) == [2, 2, 3, 3, 3]
+    unreachable = Navigator.plan((0, 0), (7, 9), steps, (3, 3), (20, 20), set())  # 7 is not a multiple of 3
+    assert sorted(unreachable) == [2, 2, 3, 3, 3]  # gets as near as it can
+
+
+def test_controls_follow_the_latest_effect_of_each_key():
+    from agent.brain.steer import Controls
+    from agent.brain.scene import LevelScene
+    scene = LevelScene()
+    scene.observations.append(Observation(Action(1), []))  # before a switch: ACTION1 did nothing
+    assert Controls.of(scene, 4) == {}
+    scene.observations.append(Observation(Action(1), [Change(4, "moved", 0, -3)]))  # after it: moves #4 up
+    assert Controls.of(scene, 4) == {1: (-3, 0)}
+
+
+def test_controls_ignore_frames_where_the_object_was_reshaped():
+    from agent.brain.steer import Controls
+    from agent.brain.scene import LevelScene
+    scene = LevelScene()
+    scene.observations.append(Observation(Action(3), [Change(4, "moved", 3, 0)]))
+    scene.observations.append(Observation(Action(3), [Change(4, "reshaped")]))  # overlapping the target
+    assert Controls.of(scene, 4) == {3: (0, 3)}
