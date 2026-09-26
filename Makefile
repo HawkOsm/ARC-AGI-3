@@ -153,5 +153,5 @@ dashboard: ## Rebuild the run board page from the run files (.claude/scratch/das
 maskcheck: ## HUD-counter masking == known counter tracks (all characterised games)
 	$(VENV_PY) eval/mask_check.py
 
-ci: check test interface maskcheck ## Local superset of CI: lint, types, build check, tests, interface facts, masks, smoke regression
+ci: check test verify-local interface maskcheck ## Local superset of CI: lint, types, build, tests, starter smoke, interface, masks, regression
 	$(VENV_PY) eval/regression_check.py

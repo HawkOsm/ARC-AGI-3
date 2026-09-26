@@ -37,6 +37,8 @@ def load_my_agent_class():
     if spec is None or spec.loader is None:
         raise SystemExit("Could not load agent/my_agent.py")
     module = importlib.util.module_from_spec(spec)
+    # Local modification: register before executing - dataclasses (agent/brain) look their module up in sys.modules.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     if not hasattr(module, "MyAgent"):
         raise SystemExit("agent/my_agent.py must define a class named `MyAgent`")
