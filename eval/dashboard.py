@@ -45,7 +45,9 @@ KAGGLE_STORY = [
     ("v4", "measured", "Thinking vs no thinking", "Thinking: 9/10 answers never finished even at 16,384 tokens. "
      "No thinking: 58% of answers were prose that hit 1,024 tokens.", "Structured JSON output + compact JSON "
      "(found on the local 4B model)."),
-    ("v5", "running", "No thinking + structured JSON", "First Kaggle run where answers should parse.", "—"),
+    ("v5", "measured", "No thinking + structured JSON: clean answers, far worse play", "Every answer parsed (9,292/9,292, "
+     "12.7 s median) and the LLM chose 98% of actions: 1 level vs the brain's 17 at the same actions. Plans are mostly "
+     "one key repeated; no theory mentions a mirror.", "Next step: owner's choice after watching replays."),
 ]
 
 

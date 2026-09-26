@@ -58,3 +58,11 @@ Kaggle or more data) · ⚠️ scorer-dependent
 | idea | verdict | evidence | notes |
 |---|---|---|---|
 | Replay after level-up (full reset, replay known shortest solutions, explore on) | ⚠️❌ | LOG 2026-09-25 replay + kaggle_sim | Local non-competition scorer: +3.86 ± 1.16 (6 games, n=2); kaggle_sim 9.76 vs 1.36. Under a **competition-mode** gateway the level-start RESET is intercepted → plays=1, gain gone. Kaggle's gateway almost certainly runs competition mode. Rejected unless a Kaggle-side observation says otherwise. |
+
+## Local LLM advisor (Phase 3)
+
+| idea | verdict | evidence | notes |
+|---|---|---|---|
+| Qwen thinking mode as the advisor | ❌ | LOG v3, v4 | 27B: 9/10 answers never finish even at 16,384 tokens (685 s median). |
+| LLM drives (stateless prompt: beliefs + 16 steps + hex screen), brain only on solved levels / failures | ❌ | LOG v5 | 27B with reliable JSON answers: 1 level vs brain 17 at equal actions; 4B locally 2 vs 6. Plans mostly one key repeated. |
+| Structured JSON output (vLLM json_schema, compact) | ✅ plumbing | LOG local + v5 | 3/3 → 0% prose failures; 9,292/9,292 clean answers on Kaggle. |

@@ -4,6 +4,17 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-26 — GPU dev run v5 (27B, no thinking, structured JSON): reliable answers, far worse play
+- Change: structured JSON output + compact JSON + `--language-model-only` (agent from before the in-flight limit).
+- Command: `notebooks/llm_dev/build.py --arm nothink:0:5400 --max-actions 1000`; brain reference via
+  `brain_at_same_actions.py` (advisor-off replay per game, seed 0, same action counts).
+- Result: 9,292 requests, **0 errors, 9,292/9,292 finish=stop**, median 12.7 s (p90 16.9 s), ~94 tokens. The LLM chose
+  **98%** of actions (19,313 / 19,723). **LLM 1 level / 0.094 vs brain 17 levels / 0.682 at the same per-game actions.**
+  Answers: 1,800 distinct plans in 9,292; the most common are one key repeated ("ACTION4" x8: 691, x4: 433,
+  "ACTION1" x8: 298); theories mostly guess a genre ("Sokoban-style"); "mirror"/"reflect" 0 times in 9,292.
+- Verdict: ❌ an LLM that drives from a stateless hex prompt is much worse than the brain. v4's 12 levels came
+  mainly from brain actions filling in for failed answers. Next step to be chosen by the owner from the replays.
+
 ## 2026-09-26 — Local 4B LLM fully in charge (after the queueing fix) + ar25 debug run
 - Change: advisor with an in-flight limit (8 locally) so the opening burst no longer times out and pauses it;
   `eval/debug_run.py` / `make debug` (one game, a printed block per decision: action, who/why, options weighed,
