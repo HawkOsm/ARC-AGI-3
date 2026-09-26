@@ -72,3 +72,10 @@ def test_parse_hypothesis():
     assert parse_hypothesis("not json", [1]) is None
     illegal = parse_hypothesis(text.replace("ACTION3", "ACTION6 1 1"), [1, 2, 3, 4])
     assert illegal is not None and illegal.test_action is None
+
+
+def test_relations_seen_earlier_are_remembered():
+    from agent.brain.scene import LevelScene
+    scene = LevelScene()
+    assert scene.remember_relations(["#5 and #6: same shape"]) == ["#5 and #6: same shape"]
+    assert scene.remember_relations([]) == ["#5 and #6: same shape (seen earlier in this level)"]

@@ -1356,6 +1356,16 @@ class LevelScene:
     parent: dict[int, int] = field(default_factory=dict)
     together: dict[tuple[int, int], int] = field(default_factory=dict)
     apart: dict[tuple[int, int], int] = field(default_factory=dict)
+    relations: dict[str, bool] = field(default_factory=dict)
+
+    def remember_relations(self, current: list[str]) -> list[str]:
+        """All relations seen during the level; those not visible right now (an object partly covered, moved
+        away) stay listed, marked as seen earlier - a clue from the level's start is not forgotten."""
+        for fact in self.relations:
+            self.relations[fact] = False
+        for fact in current:
+            self.relations[fact] = True
+        return [fact if now else f'{fact} (seen earlier in this level)' for fact, now in self.relations.items()]
 
     def root(self, object_id: int) -> int:
         """The id that stands for the whole composite object (the smallest id of the group)."""
@@ -2134,7 +2144,8 @@ class Brain:
             return None
         scene = self.scene.scene(m.level)
         wholes = [o for o in scene.objects if scene.root(o.id) == o.id]
-        question = self.prompt.object_question(scene, RelationFinder.find(wholes, *grid.shape), list(scene.observations)[-12:], self.lab.history, available)
+        relations = scene.remember_relations(RelationFinder.find(wholes, *grid.shape))
+        question = self.prompt.object_question(scene, relations, list(scene.observations)[-12:], self.lab.history, available)
         self.stats['llm_questions'] += 1
         hypothesis = adviser.hypothesise(question, available, tag=self.name)
         self.lab.next_ask_at = self.stats['actions'] + LLM_ASK_EVERY

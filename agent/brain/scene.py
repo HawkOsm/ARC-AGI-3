@@ -101,6 +101,16 @@ class LevelScene:
     parent: dict[int, int] = field(default_factory=dict)  # objects that move as one: member id -> other id
     together: dict[tuple[int, int], int] = field(default_factory=dict)  # pair -> times moved by the same step
     apart: dict[tuple[int, int], int] = field(default_factory=dict)  # pair -> times one moved differently
+    relations: dict[str, bool] = field(default_factory=dict)  # every relation seen this level -> true right now?
+
+    def remember_relations(self, current: list[str]) -> list[str]:
+        """All relations seen during the level; those not visible right now (an object partly covered, moved
+        away) stay listed, marked as seen earlier - a clue from the level's start is not forgotten."""
+        for fact in self.relations:
+            self.relations[fact] = False
+        for fact in current:
+            self.relations[fact] = True
+        return [fact if now else f"{fact} (seen earlier in this level)" for fact, now in self.relations.items()]
 
     def root(self, object_id: int) -> int:
         """The id that stands for the whole composite object (the smallest id of the group)."""

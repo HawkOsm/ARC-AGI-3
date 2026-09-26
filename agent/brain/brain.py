@@ -203,7 +203,8 @@ class Brain:
             return None
         scene = self.scene.scene(m.level)
         wholes = [o for o in scene.objects if scene.root(o.id) == o.id]
-        question = self.prompt.object_question(scene, RelationFinder.find(wholes, *grid.shape),
+        relations = scene.remember_relations(RelationFinder.find(wholes, *grid.shape))
+        question = self.prompt.object_question(scene, relations,
                                                list(scene.observations)[-12:], self.lab.history, available)
         self.stats["llm_questions"] += 1
         hypothesis = adviser.hypothesise(question, available, tag=self.name)
