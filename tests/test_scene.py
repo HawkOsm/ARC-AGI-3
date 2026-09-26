@@ -79,3 +79,19 @@ def test_relations_seen_earlier_are_remembered():
     scene = LevelScene()
     assert scene.remember_relations(["#5 and #6: same shape"]) == ["#5 and #6: same shape"]
     assert scene.remember_relations([]) == ["#5 and #6: same shape (seen earlier in this level)"]
+
+
+def test_goal_board_ranks_same_shape_pair_first_and_follows_llm_votes():
+    from agent.brain.goals import GoalBoard
+    t = _tracker()
+    g = _screen(13)
+    g[14:17, 2:5] = 11  # a yellow block with the grey block's exact shape
+    t.update(0, g, None)
+    board = GoalBoard()
+    goals = board.possible_goals(t.scene(0))
+    grey = next(o.id for o in t.scene(0).objects if o.colour == 4)
+    yellow = next(o.id for o in t.scene(0).objects if o.colour == 11)
+    assert {goals[0].a, goals[0].b} == {grey, yellow} and goals[0].relation == "identical"
+    board.vote(goals, 1)
+    assert board.chosen is goals[0]
+    assert board.possible_goals(t.scene(0))[0].score > goals[0].score  # the pick moved it up

@@ -28,6 +28,7 @@ from typing import NamedTuple
 
 import numpy as np
 
+from .goals import GoalCandidate
 from .scene import LevelScene, Observation, SceneObject
 from .world import Action, Goal, WorkingMemory, World
 from .settings import (
@@ -86,9 +87,12 @@ OBJECT_SYSTEM_PROMPT = (
     "- Every action counts against the player, so the experiment must be informative.\n"
     "- Base every claim on the evidence given. If an earlier prediction of yours was wrong, change your "
     "explanation.\n\n"
+    "- The agent also lists POSSIBLE GOALS: things on screen that belong together by shape (same shape, turned, "
+    "scaled, a piece that fills a gap in another) or copies that could be cleared. Pick the number of the one you "
+    "believe finishes the level (goal_choice), or 0 if none fits, and say why in goal.\n\n"
     "Answer with exactly one JSON object:\n"
     '{"rule": "<how the game works, in terms of object ids>", "controlled": [ids you believe the player moves], '
-    '"goal": "<what must become true to finish the level, in object ids, e.g. #4 covers #5>", '
+    '"goal_choice": 1, "goal": "<what must become true to finish the level, in object ids>", '
     '"roles": [{"id": 4, "role": "player"}, ...], '
     '"test": {"action": "ACTION4", "object": 4, "change": "moved", "direction": "left"}}\n'
     "test.change is what you expect to happen to test.object: moved (give the direction), appeared, disappeared, "
@@ -102,6 +106,7 @@ OBJECT_SCHEMA = {
     "properties": {
         "rule": {"type": "string", "maxLength": 400},
         "controlled": {"type": "array", "maxItems": 8, "items": {"type": "integer"}},
+        "goal_choice": {"type": "integer", "minimum": 0, "maximum": 9},
         "goal": {"type": "string", "maxLength": 250},
         "roles": {"type": "array", "maxItems": 16, "items": {
             "type": "object", "properties": {"id": {"type": "integer"}, "role": {"type": "string", "enum": ROLES}},
@@ -113,7 +118,7 @@ OBJECT_SCHEMA = {
             "direction": {"type": "string", "enum": ["up", "down", "left", "right", "none"]}},
             "required": ["action", "object", "change", "direction"], "additionalProperties": False},
     },
-    "required": ["rule", "controlled", "goal", "roles", "test"],
+    "required": ["rule", "controlled", "goal_choice", "goal", "roles", "test"],
     "additionalProperties": False,
 }
 
@@ -128,6 +133,7 @@ class Hypothesis(NamedTuple):
     test_object: int
     test_change: str
     test_direction: str
+    goal_choice: int = 0  # 1-based number in the brain's list of possible goals; 0 = none of them
 
     def prediction(self) -> str:
         if self.test_change == "nothing":
@@ -143,7 +149,8 @@ def parse_hypothesis(text: str, available: list[int]) -> Hypothesis | None:
         tests = parse_plan(json.dumps({"plan": [test["action"]]}), available)
         return Hypothesis(str(data["rule"]), [int(i) for i in data["controlled"]], str(data["goal"]),
                           {int(r["id"]): str(r["role"]) for r in data["roles"]}, tests[0] if tests else None,
-                          int(test["object"]), str(test["change"]), str(test["direction"]))
+                          int(test["object"]), str(test["change"]), str(test["direction"]),
+                          int(data.get("goal_choice", 0)))
     except (ValueError, KeyError, TypeError):
         return None
 
@@ -396,7 +403,8 @@ class PromptWriter:
         return "\n".join(parts)
 
     def object_question(self, scene: LevelScene, relations: list[str], observations: list[Observation],
-                        history: list[str], available: list[int]) -> str:
+                        history: list[str], available: list[int], goals: list[GoalCandidate] | None = None,
+                        purposes: list[str] | None = None) -> str:
         """The question in terms of objects: what is on screen, what the brain noticed, what actions did."""
         m = self.memory
         level = m.level if m.level is not None else 0
@@ -410,6 +418,11 @@ class PromptWriter:
                          + "\n".join(f"  {o.describe()}" for o in observations))
         else:
             parts.append("No action has been taken on this level yet.")
+        if purposes:
+            parts.append("How objects have reacted to actions so far:\n" + "\n".join(f"  {p}" for p in purposes))
+        if goals:
+            parts.append("POSSIBLE GOALS, most likely first (by shape and by what reacts):\n"
+                         + "\n".join(f"  {i}. {g.describe()}" for i, g in enumerate(goals, 1)))
         if history:
             parts.append("Your earlier explanations and how their tests turned out:\n"
                          + "\n".join(f"  {h}" for h in history))

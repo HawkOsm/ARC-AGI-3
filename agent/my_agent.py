@@ -955,331 +955,6 @@ class DeathJudge:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# agent/brain/goals.py
-# ──────────────────────────────────────────────────────────────────────────
-
-N_COLOURS = 16
-
-class ScreenFeatures:
-    """The generic feature vector of a screen (a utility class: static members only)."""
-    NAMES: list[tuple] = [('count', c) for c in range(N_COLOURS)] + [('touch', a, b) for a in range(N_COLOURS) for b in range(a + 1, N_COLOURS)] + [('avatar_touch', c) for c in range(N_COLOURS)]
-    INDEX = {name: i for i, name in enumerate(NAMES)}
-    _TOUCH_OFFSET = N_COLOURS
-    _AVATAR_OFFSET = N_COLOURS + N_COLOURS * (N_COLOURS - 1) // 2
-
-    @staticmethod
-    def of(world: World, grid: np.ndarray) -> np.ndarray:
-        """The feature vector of a screen (int16, len(NAMES)); counters are ignored."""
-        picture = world.counters.hide(grid)
-        f = np.zeros(len(ScreenFeatures.NAMES), dtype=np.int32)
-        visible = picture[picture < N_COLOURS]
-        f[:N_COLOURS] = np.bincount(visible, minlength=N_COLOURS)[:N_COLOURS]
-        touches = np.zeros((N_COLOURS, N_COLOURS), dtype=np.int32)
-        for a, b in ((picture[:, :-1], picture[:, 1:]), (picture[:-1, :], picture[1:, :])):
-            edge = (a != b) & (a < N_COLOURS) & (b < N_COLOURS)
-            lo, hi = (np.minimum(a[edge], b[edge]), np.maximum(a[edge], b[edge]))
-            np.add.at(touches, (lo, hi), 1)
-        iu = np.triu_indices(N_COLOURS, k=1)
-        f[ScreenFeatures._TOUCH_OFFSET:ScreenFeatures._AVATAR_OFFSET] = touches[iu]
-        body = world.avatar.body(picture) if world.avatar.colour is not None else None
-        if body is not None:
-            around = np.zeros_like(body)
-            around[1:, :] |= body[:-1, :]
-            around[:-1, :] |= body[1:, :]
-            around[:, 1:] |= body[:, :-1]
-            around[:, :-1] |= body[:, 1:]
-            around &= ~body
-            near = picture[around]
-            near = near[near < N_COLOURS]
-            f[ScreenFeatures._AVATAR_OFFSET:] = np.bincount(near, minlength=N_COLOURS)[:N_COLOURS]
-        return np.clip(f, -32768, 32767).astype(np.int16)
-
-class GoalTracker:
-    """Writes world.goals (from wins and first-look cues) and scores progress toward them."""
-
-    def __init__(self, world: World) -> None:
-        self.world = world
-
-    def learn_from_win(self, level: int, level_map: LevelMemory, winning_screen: Screen) -> None:
-        """The game just said "level complete": compare the last screen with the first one."""
-        world = self.world
-        start = level_map.screens.get(level_map.start_screen) if level_map.start_screen is not None else None
-        if start is None:
-            return
-        shape = world.counters.shape
-        before = ScreenFeatures.of(world, decompress_grid(start.snapshot, shape)).astype(np.int32)
-        after = ScreenFeatures.of(world, decompress_grid(winning_screen.snapshot, shape)).astype(np.int32)
-        change = after - before
-        relative = change / (np.abs(before) + 1)
-        for goal in world.goals:
-            moved = change[ScreenFeatures.INDEX[goal.feature]]
-            if moved * goal.direction > 0:
-                goal.support += 1
-            else:
-                goal.against += 1
-        known = {g.feature for g in world.goals}
-        ranked = np.argsort(-np.abs(relative))
-        added = 0
-        for i in ranked:
-            if added >= GOALS_PER_WIN or abs(relative[i]) < GOAL_MIN_RELATIVE_CHANGE:
-                break
-            name = ScreenFeatures.NAMES[i]
-            if name in known or self._is_just_moving(name):
-                continue
-            world.goals.append(Goal(feature=name, direction=int(np.sign(change[i])), support=1, against=0, source=f'won level {level}'))
-            added += 1
-
-    def cues_from_first_look(self, level: int) -> None:
-        """Weak cues the game shows before any win: one shape in several colours -> make them touch."""
-        world = self.world
-        if any((g.source.startswith('won') for g in world.goals)):
-            return
-        known = {g.feature for g in world.goals}
-        for pattern in world.patterns:
-            if pattern.level != level or pattern.type != 'same_shape':
-                continue
-            colours = sorted({k.colour for k in world.kinds.values() if k.name in pattern.kinds})
-            for i, a in enumerate(colours):
-                for b in colours[i + 1:]:
-                    name = ('touch', a, b)
-                    if name not in known:
-                        world.goals.append(Goal(feature=name, direction=1, support=0, against=0, source=f'first look level {level}: same shape', prior=GOAL_CUE_CONFIDENCE))
-                        known.add(name)
-
-    def progress(self, level_map: LevelMemory, screen: Screen) -> float:
-        """How far this screen has moved toward the confident goals, relative to the level's
-        first screen (0 = no progress; only positive progress counts)."""
-        world = self.world
-        if not world.goals or screen.features is None:
-            return 0.0
-        start = level_map.screens.get(level_map.start_screen) if level_map.start_screen is not None else None
-        if start is None or start.features is None:
-            return 0.0
-        total = 0.0
-        for goal in world.goals:
-            c = goal.confidence()
-            if c < GOAL_MIN_CONFIDENCE:
-                continue
-            i = ScreenFeatures.INDEX[goal.feature]
-            base = int(start.features[i])
-            moved = (int(screen.features[i]) - base) * goal.direction / (abs(base) + 1)
-            total += c * moved
-        return max(0.0, total)
-
-    def _is_just_moving(self, name: tuple) -> bool:
-        """Changes that only say 'the avatar is somewhere else' are not goals: the avatar's
-        own colours and what it happens to stand next to (floor)."""
-        av = self.world.avatar
-        own = {av.colour} | av.parts
-        colours = set(name[1:])
-        if name[0] == 'avatar_touch':
-            return self.world.colour_roles.role_of(name[1]) == Role.FLOOR
-        return bool(colours & own)
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# agent/brain/decide.py
-# ──────────────────────────────────────────────────────────────────────────
-
-class Explorer:
-    """Picks the next action from the beliefs. Writes only short-term memory (route) and stats."""
-
-    def __init__(self, world: World, memory: WorkingMemory, goals: GoalTracker, rng: random.Random, stats: defaultdict[str, int], restart: Callable[[], Action]) -> None:
-        self.world = world
-        self.memory = memory
-        self.goals = goals
-        self.rng = rng
-        self.stats = stats
-        self.restart = restart
-        self.considered: list[tuple[float, int, float, Action]] | None = None
-
-    def choose(self, level_map: LevelMemory, screen: Screen, available: list[int]) -> Action:
-        m = self.memory
-        if level_map.has_solution and (not m.route):
-            route = level_map.route_to_level_up(screen.id)
-            if route:
-                m.route = route
-                m.route_reason = f'replay the known solution of this level ({len(route)} steps)'
-        if not m.route:
-            m.route = self.plan_route(level_map, screen, available)
-        if m.route:
-            action, m.expected_screen = m.route.pop(0)
-            m.why = m.route_reason + (f' - {len(m.route)} more step(s) planned' if m.route else '')
-            if action == RESET_ACTION:
-                return self.restart()
-            if action[0] in available:
-                return action
-            m.route = []
-        m.expected_screen = None
-        self.stats['random_fallbacks'] += 1
-        m.why = 'random: nothing left to try that the map knows of'
-        return self._random_action(screen, available)
-
-    def plan_route(self, level_map: LevelMemory, screen: Screen, available: list[int]) -> list:
-        """Route [(action, expected screen or None), ...] to the most promising untried action."""
-        world, m = (self.world, self.memory)
-        budget = world.rules.steps_per_life.get(m.level) if m.level is not None else None
-        steps_left = float('inf') if budget is None else budget - 1 - m.life_length
-        here = self._best_untried(screen, m.came_by, available)
-        if self.considered is not None and here is not None:
-            self.considered.append((self._route_cost(0, here[0]), 0, here[0], here[1]))
-        if here is not None and here[0] >= TAKE_LOCAL_IF_CHANCE_AT_LEAST and (steps_left >= 1):
-            m.route_reason = f'explore: best untried action on this screen (chance of a new screen {here[0]:.2f})'
-            return [(here[1], None)]
-        best_cost, best, out_of_reach = (float('inf'), None, False)
-        if here is not None:
-            if steps_left >= 1:
-                best_cost, best = (self._route_cost(0, here[0]), (screen.id, here[1]))
-            else:
-                out_of_reach = True
-        distance, came_from = level_map.walking_distances(screen.id, stop_beyond=best_cost - 1)
-        for other_id, d in distance.items():
-            if d == 0 or d + 1 >= best_cost:
-                continue
-            came_by = came_from[other_id][1] if came_from[other_id] else None
-            option = self._best_untried(level_map.screens[other_id], came_by, available)
-            if option is None:
-                continue
-            if d + 1 > steps_left:
-                out_of_reach = True
-                continue
-            cost = self._route_cost(d, option[0]) * (1 + self.rng.random() * 0.001)
-            if world.goals:
-                cost /= 1 + GOAL_WEIGHT * self.goals.progress(level_map, level_map.screens[other_id])
-            if self.considered is not None:
-                self.considered.append((cost, d, option[0], option[1]))
-            if cost < best_cost:
-                best_cost, best = (cost, (other_id, option[1]))
-        if best is None:
-            if out_of_reach and m.life_length > 0:
-                self.stats['voluntary_resets'] += 1
-                m.route_reason = "reset: the untried actions left can't be reached before this life runs out"
-                return [(RESET_ACTION, None)]
-            if 6 in available and self._add_click_grid(screen):
-                return self.plan_route(level_map, screen, available)
-            return []
-        target_id, action = best
-        walk = [] if target_id == screen.id else LevelMemory.route_to(came_from, target_id)
-        chance = 1 / best_cost * (len(walk) + 1)
-        m.route_reason = f'explore: best untried action here (chance ≈{chance:.2f})' if not walk else f'explore: walk {len(walk)} step(s) to a known screen, then try an untried action there (chance ≈{chance:.2f})'
-        return walk + [(action, None)]
-
-    @staticmethod
-    def _route_cost(distance: int, chance: float) -> float:
-        """Expected actions per new screen: walk `distance`, then try something with `chance`."""
-        return (distance + 1) / max(chance, MIN_CHANCE)
-
-    def _best_untried(self, screen: Screen, came_by: Action | None, available: list[int]):
-        """(chance, action) of the most promising untried legal action on `screen`, or None."""
-        best = None
-        for action in screen.untried():
-            if action[0] not in available:
-                continue
-            chance = self.chance_of_new_screen(screen, action, came_by) + self.rng.random() * 1e-06
-            if best is None or chance > best[0]:
-                best = (chance, action)
-        return best
-
-    def _random_action(self, screen: Screen, available: list[int]) -> Action:
-        options = [a for a in screen.candidates if a[0] in available] or [Action(a, -1, -1) for a in available if a != 6]
-        if not options:
-            return Action(6, self.rng.randrange(64), self.rng.randrange(64)) if 6 in available else RESET_ACTION
-        return self.rng.choice(options)
-
-    def chance_of_new_screen(self, screen: Screen, action: Action, came_by: Action | None) -> float:
-        """Estimated chance that trying `action` on `screen` shows a screen we haven't seen."""
-        action_id = action[0]
-        prior, colour = screen.candidates.get(action, NO_INFO)
-        a = self.world.actions
-        if action_id != 6:
-            if screen.avatar_at is not None:
-                if a.died_at.get((screen.avatar_at, action_id)):
-                    return CHANCE_IF_KNOWN_DEADLY
-                if a.no_op_at.get((screen.avatar_at, action_id)):
-                    return CHANCE_IF_KNOWN_USELESS
-            if self._is_undo(action_id):
-                return CHANCE_IF_KNOWN_USELESS
-            if came_by is not None and came_by[0] != 6 and self._reverses(came_by[0], action_id):
-                return CHANCE_IF_KNOWN_USELESS
-            tally = a.changed_screen.get(action_id)
-            return tally.chance(prior) if tally else prior
-        click_tally = a.click_colour_changed_screen.get(colour)
-        return click_tally.chance(prior) if click_tally else prior
-
-    def _is_undo(self, action_id: int) -> bool:
-        t = self.world.actions.undid_last_move.get(action_id)
-        return t is not None and t.tries >= UNDO_MIN_TRIES and (t.hits / t.tries >= UNDO_RATE)
-
-    def _reverses(self, previous_id: int, action_id: int) -> bool:
-        t = self.world.actions.reversed_after.get((previous_id, action_id))
-        return t is not None and t.tries >= REVERSE_PAIR_MIN_TRIES and (t.hits / t.tries >= REVERSE_PAIR_RATE)
-
-    def candidate_actions(self, grid: np.ndarray, available: list[int]) -> dict[Action, ClickInfo]:
-        """{action: ClickInfo} for a newly seen screen, most promising first:
-        every legal key action, plus clicks on objects (and on a grid inside big objects)."""
-        world = self.world
-        candidates: dict[Action, ClickInfo] = {}
-        for action_id in sorted(available):
-            if action_id == 6:
-                continue
-            candidates[Action(action_id, -1, -1)] = ClickInfo(PRIOR_ACTION7 if action_id == 7 else PRIOR_KEY_ACTION, -1)
-        if 6 in available:
-            clicks = []
-            picture = world.counters.hide(grid)
-            visible = ~world.counters.ignore
-            for obj in ScreenReader.find_objects(picture, visible=visible):
-                prior = self._click_prior(obj)
-                clicks.append((prior, obj.size, (obj.centre_cell[1], obj.centre_cell[0]), obj.colour))
-                if obj.size > CLICK_GRID_MIN_OBJECT_CELLS:
-                    cells = obj.cells
-                    inner = cells[(cells[:, 0] % CLICK_GRID_STEP == CLICK_GRID_STEP // 2) & (cells[:, 1] % CLICK_GRID_STEP == CLICK_GRID_STEP // 2)]
-                    if len(inner) > CLICK_GRID_MAX_PER_OBJECT:
-                        inner = inner[np.linspace(0, len(inner) - 1, CLICK_GRID_MAX_PER_OBJECT).astype(int)]
-                    for y, x in inner.tolist():
-                        clicks.append((prior * CLICK_GRID_PRIOR_FACTOR, obj.size, (x, y), obj.colour))
-            clicks.sort(key=lambda t: (-t[0], t[1]))
-            for prior, _size, (x, y), colour in clicks[:MAX_CLICKS_PER_SCREEN]:
-                action = Action(6, x, y)
-                if action not in candidates:
-                    candidates[action] = ClickInfo(prior, colour)
-        return candidates
-
-    def _add_click_grid(self, screen: Screen) -> bool:
-        """Screen exhausted: add clicks on a whole-screen grid (step 4, then 2, then 1)."""
-        m = self.memory
-        if screen.click_scans >= len(EXHAUSTED_SCREEN_CLICK_STEPS):
-            return False
-        step = EXHAUSTED_SCREEN_CLICK_STEPS[screen.click_scans]
-        level = m.level if m.level is not None else 0
-        if step == 1:
-            if m.pixel_scans.get(level, 0) >= MAX_PIXEL_SCANS_PER_LEVEL:
-                screen.click_scans = len(EXHAUSTED_SCREEN_CLICK_STEPS)
-                return False
-            m.pixel_scans[level] = m.pixel_scans.get(level, 0) + 1
-        screen.click_scans += 1
-        ignore = self.world.counters.ignore
-        grid = decompress_grid(screen.snapshot, ignore.shape)
-        added = 0
-        for y in range(step // 2, grid.shape[0], step):
-            for x in range(step // 2, grid.shape[1], step):
-                action = Action(6, x, y)
-                if action in screen.candidates or ignore[y, x]:
-                    continue
-                screen.candidates[action] = ClickInfo(PRIOR_CLICK_LARGE, int(grid[y, x]))
-                added += 1
-        self.stats['click_grids'] += 1
-        return added > 0 or self._add_click_grid(screen)
-
-    @staticmethod
-    def _click_prior(obj: Blob) -> float:
-        if obj.size > LARGE_OBJECT_CELLS:
-            return PRIOR_CLICK_LARGE
-        if obj.size == 1:
-            return PRIOR_CLICK_SINGLE_PIXEL
-        return PRIOR_CLICK_SMALL
-
-
-# ──────────────────────────────────────────────────────────────────────────
 # agent/brain/scene.py
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -1607,14 +1282,592 @@ class RelationFinder:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# agent/brain/shapes.py
+# ──────────────────────────────────────────────────────────────────────────
+
+RELATION_STRENGTH = {'identical': 1.0, 'turned': 0.8, 'fills-gap': 0.8, 'scaled': 0.6, 'fits-inside': 0.5, 'same-colour': 0.3}
+MAX_KINDS = 30
+MAX_PER_OBJECT = 3
+SNUG = 2.0
+
+@dataclass(slots=True)
+class Correspondence:
+    relation: str
+    a: int
+    b: int
+    strength: float
+
+    def describe(self) -> str:
+        words = {'identical': 'same shape', 'turned': 'same shape, turned or flipped', 'scaled': 'same shape, scaled', 'fills-gap': 'fills a gap in', 'fits-inside': 'fits inside', 'same-colour': 'same colour as'}
+        return f'#{self.a} {words[self.relation]} #{self.b}'
+
+def mask_of(obj: SceneObject) -> np.ndarray:
+    h, w, raw = obj.shape
+    return np.frombuffer(raw, dtype=bool).reshape(h, w)
+
+def turns(mask: np.ndarray) -> list[np.ndarray]:
+    """The 8 rotations/reflections of a mask."""
+    out = []
+    for m in (mask, np.fliplr(mask)):
+        for k in range(4):
+            out.append(np.rot90(m, k))
+    return out
+
+def same_mask(a: np.ndarray, b: np.ndarray) -> bool:
+    return a.shape == b.shape and bool(np.array_equal(a, b))
+
+class ShapeRelations:
+    """Pairwise shape correspondences between the kinds on screen (a utility class)."""
+
+    @staticmethod
+    def find(scene: LevelScene) -> list[Correspondence]:
+        kinds: dict[tuple, SceneObject] = {}
+        for o in scene.objects:
+            if o.background or scene.root(o.id) != o.id:
+                continue
+            kinds.setdefault((o.colour, o.shape), o)
+        reps = sorted(kinds.values(), key=lambda o: -o.size)[:MAX_KINDS]
+        masks = {o.id: mask_of(o) for o in reps}
+        found: list[Correspondence] = []
+        for i, a in enumerate(reps):
+            for b in reps[i + 1:]:
+                relation = ShapeRelations._relate(a, b, masks[a.id], masks[b.id])
+                if relation:
+                    found.append(Correspondence(relation, a.id, b.id, RELATION_STRENGTH[relation]))
+        found.sort(key=lambda c: -c.strength)
+        per_object: dict[int, int] = {}
+        kept = []
+        for c in found:
+            if per_object.get(c.a, 0) >= MAX_PER_OBJECT or per_object.get(c.b, 0) >= MAX_PER_OBJECT:
+                continue
+            per_object[c.a] = per_object.get(c.a, 0) + 1
+            per_object[c.b] = per_object.get(c.b, 0) + 1
+            kept.append(c)
+        return kept
+
+    @staticmethod
+    def _relate(a: SceneObject, b: SceneObject, ma: np.ndarray, mb: np.ndarray) -> str | None:
+        if a.size > 1 and b.size > 1:
+            if same_mask(ma, mb):
+                return 'identical' if a.colour != b.colour else None
+            if any((same_mask(t, mb) for t in turns(ma))):
+                return 'turned'
+            if ShapeRelations._scaled(ma, mb) or ShapeRelations._scaled(mb, ma):
+                return 'scaled'
+        if ShapeRelations._fills_gap(ma, mb) or ShapeRelations._fills_gap(mb, ma):
+            return 'fills-gap'
+        if ShapeRelations._fits_inside(ma, mb) or ShapeRelations._fits_inside(mb, ma):
+            return 'fits-inside'
+        if a.colour == b.colour and a.size > 1 and (b.size > 1):
+            return 'same-colour'
+        return None
+
+    @staticmethod
+    def _scaled(small: np.ndarray, big: np.ndarray) -> bool:
+        for k in (2, 3, 4):
+            if big.shape == (small.shape[0] * k, small.shape[1] * k):
+                down = big.reshape(small.shape[0], k, small.shape[1], k).mean(axis=(1, 3)) >= 0.5
+                if any((same_mask(t, down) for t in turns(small))):
+                    return True
+        return False
+
+    @staticmethod
+    def _gaps(mask: np.ndarray) -> list[np.ndarray]:
+        """Connected empty regions inside a mask's box (notches and holes), each cropped to its own box."""
+        empty = ~mask
+        gaps = []
+        for blob in ScreenReader.changed_blobs(empty):
+            cells = np.array(blob)
+            if len(cells) == empty.size:
+                continue
+            y0, x0 = cells.min(axis=0)
+            y1, x1 = cells.max(axis=0)
+            crop = np.zeros((y1 - y0 + 1, x1 - x0 + 1), dtype=bool)
+            crop[cells[:, 0] - y0, cells[:, 1] - x0] = True
+            touches_edge = y0 == 0 or x0 == 0 or y1 == mask.shape[0] - 1 or (x1 == mask.shape[1] - 1)
+            gaps.append((crop, touches_edge))
+        return gaps
+
+    @staticmethod
+    def _fills_gap(piece: np.ndarray, holder: np.ndarray) -> bool:
+        """An irregular piece (not a plain rectangle: those fill every rectangular gap) matching a gap exactly."""
+        if piece.sum() < 3 or piece.all() or holder.size <= piece.size:
+            return False
+        return any((any((same_mask(t, gap) for t in turns(piece))) for gap, _edge in ShapeRelations._gaps(holder)))
+
+    @staticmethod
+    def _fits_inside(piece: np.ndarray, holder: np.ndarray) -> bool:
+        if piece.sum() < 2:
+            return False
+        for gap, touches_edge in ShapeRelations._gaps(holder):
+            if not touches_edge and gap.shape[0] >= piece.shape[0] and (gap.shape[1] >= piece.shape[1]) and (piece.sum() <= gap.sum() <= SNUG * piece.sum()) and (not same_mask(gap, piece)):
+                return True
+        return False
+
+def colour_name(obj: SceneObject) -> str:
+    return COLOUR_NAMES[obj.colour]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# agent/brain/goals.py
+# ──────────────────────────────────────────────────────────────────────────
+
+N_COLOURS = 16
+
+class ScreenFeatures:
+    """The generic feature vector of a screen (a utility class: static members only)."""
+    NAMES: list[tuple] = [('count', c) for c in range(N_COLOURS)] + [('touch', a, b) for a in range(N_COLOURS) for b in range(a + 1, N_COLOURS)] + [('avatar_touch', c) for c in range(N_COLOURS)]
+    INDEX = {name: i for i, name in enumerate(NAMES)}
+    _TOUCH_OFFSET = N_COLOURS
+    _AVATAR_OFFSET = N_COLOURS + N_COLOURS * (N_COLOURS - 1) // 2
+
+    @staticmethod
+    def of(world: World, grid: np.ndarray) -> np.ndarray:
+        """The feature vector of a screen (int16, len(NAMES)); counters are ignored."""
+        picture = world.counters.hide(grid)
+        f = np.zeros(len(ScreenFeatures.NAMES), dtype=np.int32)
+        visible = picture[picture < N_COLOURS]
+        f[:N_COLOURS] = np.bincount(visible, minlength=N_COLOURS)[:N_COLOURS]
+        touches = np.zeros((N_COLOURS, N_COLOURS), dtype=np.int32)
+        for a, b in ((picture[:, :-1], picture[:, 1:]), (picture[:-1, :], picture[1:, :])):
+            edge = (a != b) & (a < N_COLOURS) & (b < N_COLOURS)
+            lo, hi = (np.minimum(a[edge], b[edge]), np.maximum(a[edge], b[edge]))
+            np.add.at(touches, (lo, hi), 1)
+        iu = np.triu_indices(N_COLOURS, k=1)
+        f[ScreenFeatures._TOUCH_OFFSET:ScreenFeatures._AVATAR_OFFSET] = touches[iu]
+        body = world.avatar.body(picture) if world.avatar.colour is not None else None
+        if body is not None:
+            around = np.zeros_like(body)
+            around[1:, :] |= body[:-1, :]
+            around[:-1, :] |= body[1:, :]
+            around[:, 1:] |= body[:, :-1]
+            around[:, :-1] |= body[:, 1:]
+            around &= ~body
+            near = picture[around]
+            near = near[near < N_COLOURS]
+            f[ScreenFeatures._AVATAR_OFFSET:] = np.bincount(near, minlength=N_COLOURS)[:N_COLOURS]
+        return np.clip(f, -32768, 32767).astype(np.int16)
+
+class Goals:
+    """Writes world.goals (from wins and first-look cues) and scores progress toward them."""
+
+    def __init__(self, world: World) -> None:
+        self.world = world
+
+    def learn_from_win(self, level: int, level_map: LevelMemory, winning_screen: Screen) -> None:
+        """The game just said "level complete": compare the last screen with the first one."""
+        world = self.world
+        start = level_map.screens.get(level_map.start_screen) if level_map.start_screen is not None else None
+        if start is None:
+            return
+        shape = world.counters.shape
+        before = ScreenFeatures.of(world, decompress_grid(start.snapshot, shape)).astype(np.int32)
+        after = ScreenFeatures.of(world, decompress_grid(winning_screen.snapshot, shape)).astype(np.int32)
+        change = after - before
+        relative = change / (np.abs(before) + 1)
+        for goal in world.goals:
+            moved = change[ScreenFeatures.INDEX[goal.feature]]
+            if moved * goal.direction > 0:
+                goal.support += 1
+            else:
+                goal.against += 1
+        known = {g.feature for g in world.goals}
+        ranked = np.argsort(-np.abs(relative))
+        added = 0
+        for i in ranked:
+            if added >= GOALS_PER_WIN or abs(relative[i]) < GOAL_MIN_RELATIVE_CHANGE:
+                break
+            name = ScreenFeatures.NAMES[i]
+            if name in known or self._is_just_moving(name):
+                continue
+            world.goals.append(Goal(feature=name, direction=int(np.sign(change[i])), support=1, against=0, source=f'won level {level}'))
+            added += 1
+
+    def cues_from_first_look(self, level: int) -> None:
+        """Weak cues the game shows before any win: one shape in several colours -> make them touch."""
+        world = self.world
+        if any((g.source.startswith('won') for g in world.goals)):
+            return
+        known = {g.feature for g in world.goals}
+        for pattern in world.patterns:
+            if pattern.level != level or pattern.type != 'same_shape':
+                continue
+            colours = sorted({k.colour for k in world.kinds.values() if k.name in pattern.kinds})
+            for i, a in enumerate(colours):
+                for b in colours[i + 1:]:
+                    name = ('touch', a, b)
+                    if name not in known:
+                        world.goals.append(Goal(feature=name, direction=1, support=0, against=0, source=f'first look level {level}: same shape', prior=GOAL_CUE_CONFIDENCE))
+                        known.add(name)
+
+    def progress(self, level_map: LevelMemory, screen: Screen) -> float:
+        """How far this screen has moved toward the confident goals, relative to the level's
+        first screen (0 = no progress; only positive progress counts)."""
+        world = self.world
+        if not world.goals or screen.features is None:
+            return 0.0
+        start = level_map.screens.get(level_map.start_screen) if level_map.start_screen is not None else None
+        if start is None or start.features is None:
+            return 0.0
+        total = 0.0
+        for goal in world.goals:
+            c = goal.confidence()
+            if c < GOAL_MIN_CONFIDENCE:
+                continue
+            i = ScreenFeatures.INDEX[goal.feature]
+            base = int(start.features[i])
+            moved = (int(screen.features[i]) - base) * goal.direction / (abs(base) + 1)
+            total += c * moved
+        return max(0.0, total)
+
+    @staticmethod
+    def reacting_objects(scene: LevelScene) -> set[int]:
+        """Objects that moved or changed right after one of our actions this level."""
+        return {c.object_id for o in scene.observations for c in o.changes if c.kind != 'appeared'}
+
+    @staticmethod
+    def overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+        """Overlap of two boxes (y0, x0, y1, x1) as a share of the smaller one: 1 = one lies on the other."""
+        h = min(a[2], b[2]) - max(a[0], b[0]) + 1
+        w = min(a[3], b[3]) - max(a[1], b[1]) + 1
+        smaller = min((a[2] - a[0] + 1) * (a[3] - a[1] + 1), (b[2] - b[0] + 1) * (b[3] - b[1] + 1))
+        return max(0, h) * max(0, w) / smaller if smaller else 0.0
+
+    @staticmethod
+    def distance(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+        """Distance between box centres, in cells."""
+        return float(np.hypot((a[0] + a[2] - b[0] - b[2]) / 2, (a[1] + a[3] - b[1] - b[3]) / 2))
+
+    @staticmethod
+    def progress_text(scene: LevelScene, goal: GoalCandidate | None) -> str:
+        if goal is None:
+            return ''
+        boxes = {o.id: o.bbox for o in scene.objects}
+        if goal.relation == 'clear':
+            left = sum((1 for o in scene.objects if (o.colour, o.shape) == goal.kind))
+            return f'{left} of {goal.b} copies left'
+        if goal.a not in boxes or goal.b not in boxes:
+            return 'one of the two objects is not visible'
+        return f'overlap {Goals.overlap(boxes[goal.a], boxes[goal.b]):.2f}, distance {Goals.distance(boxes[goal.a], boxes[goal.b]):.1f} cells'
+
+    @staticmethod
+    def purposes(scene: LevelScene) -> list[str]:
+        """What each reacting object seems to be for, from how it responded to actions."""
+        moves: dict[int, dict[str, set[str]]] = {}
+        for obs in scene.observations:
+            a = obs.action
+            name = 'click' if a[0] == 6 else f'ACTION{a[0]}'
+            for c in obs.changes:
+                if c.kind == 'moved':
+                    d = ('right' if c.dx > 0 else 'left') if c.dx else 'down' if c.dy > 0 else 'up'
+                    moves.setdefault(c.object_id, {}).setdefault(name, set()).add(d)
+                elif c.kind in ('recoloured', 'disappeared'):
+                    moves.setdefault(c.object_id, {}).setdefault(name, set()).add(c.kind)
+        lines = []
+        for oid, by_action in sorted(moves.items()):
+            parts = [f"{act} -> {'/'.join(sorted(ds))}" for act, ds in sorted(by_action.items())]
+            lines.append(f'#{oid}: ' + ', '.join(parts))
+        return lines[:12]
+
+    def _is_just_moving(self, name: tuple) -> bool:
+        """Changes that only say 'the avatar is somewhere else' are not goals: the avatar's
+        own colours and what it happens to stand next to (floor)."""
+        av = self.world.avatar
+        own = {av.colour} | av.parts
+        colours = set(name[1:])
+        if name[0] == 'avatar_touch':
+            return self.world.colour_roles.role_of(name[1]) == Role.FLOOR
+        return bool(colours & own)
+
+@dataclass(slots=True)
+class GoalCandidate:
+    """One possible goal: two objects that belong together should coincide, or copies of a kind should go."""
+    relation: str
+    a: int
+    b: int
+    score: float
+    why: str
+    kind: tuple | None = None
+
+    @property
+    def key(self) -> tuple[str, int, int]:
+        return (self.relation, self.a, self.b)
+
+    def describe(self) -> str:
+        if self.relation == 'clear':
+            return f'all {self.b} copies of #{self.a} are gone ({self.why})'
+        return f'#{self.a} and #{self.b} end up together / overlapping ({self.why})'
+
+class GoalBoard:
+    """The ranked list of possible goals, re-ranked as evidence arrives (hypothesis mode).
+
+    score = shape strength x (1 + reacts to our actions) x (1 + 0.5 x LLM picks) x (1 + wins of this relation)
+    """
+
+    def __init__(self) -> None:
+        self.llm_votes: dict[tuple[str, int, int], int] = {}
+        self.won_relations: dict[str, int] = {}
+        self.chosen: GoalCandidate | None = None
+        self._cache_key: frozenset = frozenset()
+        self._cache: list[Correspondence] = []
+
+    def possible_goals(self, scene: LevelScene) -> list[GoalCandidate]:
+        reacting = Goals.reacting_objects(scene)
+        kinds_now = frozenset(((o.colour, o.shape) for o in scene.objects if not o.background))
+        if kinds_now != self._cache_key:
+            self._cache_key, self._cache = (kinds_now, ShapeRelations.find(scene))
+        candidates = []
+        for c in self._cache:
+            if c.relation == 'same-colour':
+                continue
+            live = c.a in reacting or c.b in reacting
+            votes = self.llm_votes.get((c.relation, c.a, c.b), 0)
+            wins = self.won_relations.get(c.relation, 0)
+            score = c.strength * (2.0 if live else 1.0) * (1 + 0.5 * votes) * (1 + wins)
+            why = c.describe().split(' ', 1)[1].rsplit(' ', 1)[0]
+            if live:
+                why += ', and one of them reacts to actions'
+            candidates.append(GoalCandidate(c.relation, c.a, c.b, score, why))
+        copies: dict[tuple, list[SceneObject]] = {}
+        for o in scene.objects:
+            if not o.background and scene.root(o.id) == o.id and (o.size > 1):
+                copies.setdefault((o.colour, o.shape), []).append(o)
+        for group in copies.values():
+            if len(group) >= 3:
+                key = ('clear', group[0].id, len(group))
+                score = 0.4 * (1 + 0.5 * self.llm_votes.get(key, 0)) * (1 + self.won_relations.get('clear', 0))
+                candidates.append(GoalCandidate('clear', group[0].id, len(group), score, f'{len(group)} identical copies', (group[0].colour, group[0].shape)))
+        candidates.sort(key=lambda g: -g.score)
+        return candidates[:MAX_GOAL_CANDIDATES]
+
+    def vote(self, candidates: list[GoalCandidate], choice: int) -> None:
+        """The LLM picked candidate `choice` (1-based; 0 = none of them): it moves up the list."""
+        if 1 <= choice <= len(candidates):
+            picked = candidates[choice - 1]
+            self.llm_votes[picked.key] = self.llm_votes.get(picked.key, 0) + 1
+            self.chosen = picked
+
+    def learn_from_win(self, scene: LevelScene) -> None:
+        """Which kinds of relation held when the level was won? They rank higher on later levels."""
+        boxes = {o.id: o.bbox for o in scene.objects}
+        for c in self._cache:
+            if c.a in boxes and c.b in boxes and (Goals.overlap(boxes[c.a], boxes[c.b]) >= 0.5):
+                self.won_relations[c.relation] = self.won_relations.get(c.relation, 0) + 1
+        self._cache_key = frozenset()
+MAX_GOAL_CANDIDATES = 8
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# agent/brain/decide.py
+# ──────────────────────────────────────────────────────────────────────────
+
+class Explorer:
+    """Picks the next action from the beliefs. Writes only short-term memory (route) and stats."""
+
+    def __init__(self, world: World, memory: WorkingMemory, goals: Goals, rng: random.Random, stats: defaultdict[str, int], restart: Callable[[], Action]) -> None:
+        self.world = world
+        self.memory = memory
+        self.goals = goals
+        self.rng = rng
+        self.stats = stats
+        self.restart = restart
+        self.considered: list[tuple[float, int, float, Action]] | None = None
+
+    def choose(self, level_map: LevelMemory, screen: Screen, available: list[int]) -> Action:
+        m = self.memory
+        if level_map.has_solution and (not m.route):
+            route = level_map.route_to_level_up(screen.id)
+            if route:
+                m.route = route
+                m.route_reason = f'replay the known solution of this level ({len(route)} steps)'
+        if not m.route:
+            m.route = self.plan_route(level_map, screen, available)
+        if m.route:
+            action, m.expected_screen = m.route.pop(0)
+            m.why = m.route_reason + (f' - {len(m.route)} more step(s) planned' if m.route else '')
+            if action == RESET_ACTION:
+                return self.restart()
+            if action[0] in available:
+                return action
+            m.route = []
+        m.expected_screen = None
+        self.stats['random_fallbacks'] += 1
+        m.why = 'random: nothing left to try that the map knows of'
+        return self._random_action(screen, available)
+
+    def plan_route(self, level_map: LevelMemory, screen: Screen, available: list[int]) -> list:
+        """Route [(action, expected screen or None), ...] to the most promising untried action."""
+        world, m = (self.world, self.memory)
+        budget = world.rules.steps_per_life.get(m.level) if m.level is not None else None
+        steps_left = float('inf') if budget is None else budget - 1 - m.life_length
+        here = self._best_untried(screen, m.came_by, available)
+        if self.considered is not None and here is not None:
+            self.considered.append((self._route_cost(0, here[0]), 0, here[0], here[1]))
+        if here is not None and here[0] >= TAKE_LOCAL_IF_CHANCE_AT_LEAST and (steps_left >= 1):
+            m.route_reason = f'explore: best untried action on this screen (chance of a new screen {here[0]:.2f})'
+            return [(here[1], None)]
+        best_cost, best, out_of_reach = (float('inf'), None, False)
+        if here is not None:
+            if steps_left >= 1:
+                best_cost, best = (self._route_cost(0, here[0]), (screen.id, here[1]))
+            else:
+                out_of_reach = True
+        distance, came_from = level_map.walking_distances(screen.id, stop_beyond=best_cost - 1)
+        for other_id, d in distance.items():
+            if d == 0 or d + 1 >= best_cost:
+                continue
+            came_by = came_from[other_id][1] if came_from[other_id] else None
+            option = self._best_untried(level_map.screens[other_id], came_by, available)
+            if option is None:
+                continue
+            if d + 1 > steps_left:
+                out_of_reach = True
+                continue
+            cost = self._route_cost(d, option[0]) * (1 + self.rng.random() * 0.001)
+            if world.goals:
+                cost /= 1 + GOAL_WEIGHT * self.goals.progress(level_map, level_map.screens[other_id])
+            if self.considered is not None:
+                self.considered.append((cost, d, option[0], option[1]))
+            if cost < best_cost:
+                best_cost, best = (cost, (other_id, option[1]))
+        if best is None:
+            if out_of_reach and m.life_length > 0:
+                self.stats['voluntary_resets'] += 1
+                m.route_reason = "reset: the untried actions left can't be reached before this life runs out"
+                return [(RESET_ACTION, None)]
+            if 6 in available and self._add_click_grid(screen):
+                return self.plan_route(level_map, screen, available)
+            return []
+        target_id, action = best
+        walk = [] if target_id == screen.id else LevelMemory.route_to(came_from, target_id)
+        chance = 1 / best_cost * (len(walk) + 1)
+        m.route_reason = f'explore: best untried action here (chance ≈{chance:.2f})' if not walk else f'explore: walk {len(walk)} step(s) to a known screen, then try an untried action there (chance ≈{chance:.2f})'
+        return walk + [(action, None)]
+
+    @staticmethod
+    def _route_cost(distance: int, chance: float) -> float:
+        """Expected actions per new screen: walk `distance`, then try something with `chance`."""
+        return (distance + 1) / max(chance, MIN_CHANCE)
+
+    def _best_untried(self, screen: Screen, came_by: Action | None, available: list[int]):
+        """(chance, action) of the most promising untried legal action on `screen`, or None."""
+        best = None
+        for action in screen.untried():
+            if action[0] not in available:
+                continue
+            chance = self.chance_of_new_screen(screen, action, came_by) + self.rng.random() * 1e-06
+            if best is None or chance > best[0]:
+                best = (chance, action)
+        return best
+
+    def _random_action(self, screen: Screen, available: list[int]) -> Action:
+        options = [a for a in screen.candidates if a[0] in available] or [Action(a, -1, -1) for a in available if a != 6]
+        if not options:
+            return Action(6, self.rng.randrange(64), self.rng.randrange(64)) if 6 in available else RESET_ACTION
+        return self.rng.choice(options)
+
+    def chance_of_new_screen(self, screen: Screen, action: Action, came_by: Action | None) -> float:
+        """Estimated chance that trying `action` on `screen` shows a screen we haven't seen."""
+        action_id = action[0]
+        prior, colour = screen.candidates.get(action, NO_INFO)
+        a = self.world.actions
+        if action_id != 6:
+            if screen.avatar_at is not None:
+                if a.died_at.get((screen.avatar_at, action_id)):
+                    return CHANCE_IF_KNOWN_DEADLY
+                if a.no_op_at.get((screen.avatar_at, action_id)):
+                    return CHANCE_IF_KNOWN_USELESS
+            if self._is_undo(action_id):
+                return CHANCE_IF_KNOWN_USELESS
+            if came_by is not None and came_by[0] != 6 and self._reverses(came_by[0], action_id):
+                return CHANCE_IF_KNOWN_USELESS
+            tally = a.changed_screen.get(action_id)
+            return tally.chance(prior) if tally else prior
+        click_tally = a.click_colour_changed_screen.get(colour)
+        return click_tally.chance(prior) if click_tally else prior
+
+    def _is_undo(self, action_id: int) -> bool:
+        t = self.world.actions.undid_last_move.get(action_id)
+        return t is not None and t.tries >= UNDO_MIN_TRIES and (t.hits / t.tries >= UNDO_RATE)
+
+    def _reverses(self, previous_id: int, action_id: int) -> bool:
+        t = self.world.actions.reversed_after.get((previous_id, action_id))
+        return t is not None and t.tries >= REVERSE_PAIR_MIN_TRIES and (t.hits / t.tries >= REVERSE_PAIR_RATE)
+
+    def candidate_actions(self, grid: np.ndarray, available: list[int]) -> dict[Action, ClickInfo]:
+        """{action: ClickInfo} for a newly seen screen, most promising first:
+        every legal key action, plus clicks on objects (and on a grid inside big objects)."""
+        world = self.world
+        candidates: dict[Action, ClickInfo] = {}
+        for action_id in sorted(available):
+            if action_id == 6:
+                continue
+            candidates[Action(action_id, -1, -1)] = ClickInfo(PRIOR_ACTION7 if action_id == 7 else PRIOR_KEY_ACTION, -1)
+        if 6 in available:
+            clicks = []
+            picture = world.counters.hide(grid)
+            visible = ~world.counters.ignore
+            for obj in ScreenReader.find_objects(picture, visible=visible):
+                prior = self._click_prior(obj)
+                clicks.append((prior, obj.size, (obj.centre_cell[1], obj.centre_cell[0]), obj.colour))
+                if obj.size > CLICK_GRID_MIN_OBJECT_CELLS:
+                    cells = obj.cells
+                    inner = cells[(cells[:, 0] % CLICK_GRID_STEP == CLICK_GRID_STEP // 2) & (cells[:, 1] % CLICK_GRID_STEP == CLICK_GRID_STEP // 2)]
+                    if len(inner) > CLICK_GRID_MAX_PER_OBJECT:
+                        inner = inner[np.linspace(0, len(inner) - 1, CLICK_GRID_MAX_PER_OBJECT).astype(int)]
+                    for y, x in inner.tolist():
+                        clicks.append((prior * CLICK_GRID_PRIOR_FACTOR, obj.size, (x, y), obj.colour))
+            clicks.sort(key=lambda t: (-t[0], t[1]))
+            for prior, _size, (x, y), colour in clicks[:MAX_CLICKS_PER_SCREEN]:
+                action = Action(6, x, y)
+                if action not in candidates:
+                    candidates[action] = ClickInfo(prior, colour)
+        return candidates
+
+    def _add_click_grid(self, screen: Screen) -> bool:
+        """Screen exhausted: add clicks on a whole-screen grid (step 4, then 2, then 1)."""
+        m = self.memory
+        if screen.click_scans >= len(EXHAUSTED_SCREEN_CLICK_STEPS):
+            return False
+        step = EXHAUSTED_SCREEN_CLICK_STEPS[screen.click_scans]
+        level = m.level if m.level is not None else 0
+        if step == 1:
+            if m.pixel_scans.get(level, 0) >= MAX_PIXEL_SCANS_PER_LEVEL:
+                screen.click_scans = len(EXHAUSTED_SCREEN_CLICK_STEPS)
+                return False
+            m.pixel_scans[level] = m.pixel_scans.get(level, 0) + 1
+        screen.click_scans += 1
+        ignore = self.world.counters.ignore
+        grid = decompress_grid(screen.snapshot, ignore.shape)
+        added = 0
+        for y in range(step // 2, grid.shape[0], step):
+            for x in range(step // 2, grid.shape[1], step):
+                action = Action(6, x, y)
+                if action in screen.candidates or ignore[y, x]:
+                    continue
+                screen.candidates[action] = ClickInfo(PRIOR_CLICK_LARGE, int(grid[y, x]))
+                added += 1
+        self.stats['click_grids'] += 1
+        return added > 0 or self._add_click_grid(screen)
+
+    @staticmethod
+    def _click_prior(obj: Blob) -> float:
+        if obj.size > LARGE_OBJECT_CELLS:
+            return PRIOR_CLICK_LARGE
+        if obj.size == 1:
+            return PRIOR_CLICK_SINGLE_PIXEL
+        return PRIOR_CLICK_SMALL
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # agent/brain/llm.py
 # ──────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = 'You are playing an unknown turn-based puzzle game on a 64x64 grid. Nobody tells you the rules or the goal: you find them out by acting and watching what changes.\n\n- Each cell holds a colour 0-15, written as one hex digit 0-f. Row y goes top (0) to bottom (63), column x left (0) to right (63).\n- ACTION1..ACTION5 are simple inputs (often ACTION1=up, ACTION2=down, ACTION3=left, ACTION4=right, ACTION5=use/select, but check the evidence). ACTION6 x y clicks cell (x, y). ACTION7 is usually undo. Only the listed available actions can be used.\n- A level is won by reaching some goal state; the game then shows the next level. Many games have a step counter or lives shown on screen; running out loses the life and restarts the level.\n- Every action counts against you, including ones that change nothing: finish each level in as FEW actions as possible.\n\nAnswer with exactly one JSON object and nothing else:\n{"theory": "<one or two sentences: what the game is and what you are trying>", "plan": ["ACTION4", "ACTION4", "ACTION6 12 30"]}\nThe plan holds 1 to 8 actions to take next, in order.'
 PLAN_SCHEMA = {'type': 'object', 'properties': {'theory': {'type': 'string', 'maxLength': 400}, 'plan': {'type': 'array', 'minItems': 1, 'maxItems': LLM_PLAN_MAX, 'items': {'type': 'string', 'pattern': '^ACTION[1-7]( [0-9]{1,2} [0-9]{1,2})?$'}}}, 'required': ['theory', 'plan'], 'additionalProperties': False}
-OBJECT_SYSTEM_PROMPT = 'You help an agent play an unknown turn-based puzzle game on a 64x64 grid. Nobody knows the rules or the goal. The agent\'s eyes have split the screen into numbered objects (ids stay the same during a level), noticed some relations between them, and recorded exactly what each action did to which object. Your job is to explain the game in terms of these objects and to propose ONE experiment that tests your explanation.\n\n- ACTION1..ACTION5 are simple inputs (often up, down, left, right, use), ACTION6 x y clicks a cell, ACTION7 is often undo. Only the listed actions exist in this game.\n- Every action counts against the player, so the experiment must be informative.\n- Base every claim on the evidence given. If an earlier prediction of yours was wrong, change your explanation.\n\nAnswer with exactly one JSON object:\n{"rule": "<how the game works, in terms of object ids>", "controlled": [ids you believe the player moves], "goal": "<what must become true to finish the level, in object ids, e.g. #4 covers #5>", "roles": [{"id": 4, "role": "player"}, ...], "test": {"action": "ACTION4", "object": 4, "change": "moved", "direction": "left"}}\ntest.change is what you expect to happen to test.object: moved (give the direction), appeared, disappeared, recoloured, or nothing.'
+OBJECT_SYSTEM_PROMPT = 'You help an agent play an unknown turn-based puzzle game on a 64x64 grid. Nobody knows the rules or the goal. The agent\'s eyes have split the screen into numbered objects (ids stay the same during a level), noticed some relations between them, and recorded exactly what each action did to which object. Your job is to explain the game in terms of these objects and to propose ONE experiment that tests your explanation.\n\n- ACTION1..ACTION5 are simple inputs (often up, down, left, right, use), ACTION6 x y clicks a cell, ACTION7 is often undo. Only the listed actions exist in this game.\n- Every action counts against the player, so the experiment must be informative.\n- Base every claim on the evidence given. If an earlier prediction of yours was wrong, change your explanation.\n\n- The agent also lists POSSIBLE GOALS: things on screen that belong together by shape (same shape, turned, scaled, a piece that fills a gap in another) or copies that could be cleared. Pick the number of the one you believe finishes the level (goal_choice), or 0 if none fits, and say why in goal.\n\nAnswer with exactly one JSON object:\n{"rule": "<how the game works, in terms of object ids>", "controlled": [ids you believe the player moves], "goal_choice": 1, "goal": "<what must become true to finish the level, in object ids>", "roles": [{"id": 4, "role": "player"}, ...], "test": {"action": "ACTION4", "object": 4, "change": "moved", "direction": "left"}}\ntest.change is what you expect to happen to test.object: moved (give the direction), appeared, disappeared, recoloured, or nothing.'
 ROLES = ['player', 'goal', 'mirror-copy', 'mirror-line', 'wall', 'floor', 'pushable', 'collectible', 'hazard', 'switch', 'indicator', 'background', 'decoration', 'unknown']
-OBJECT_SCHEMA = {'type': 'object', 'properties': {'rule': {'type': 'string', 'maxLength': 400}, 'controlled': {'type': 'array', 'maxItems': 8, 'items': {'type': 'integer'}}, 'goal': {'type': 'string', 'maxLength': 250}, 'roles': {'type': 'array', 'maxItems': 16, 'items': {'type': 'object', 'properties': {'id': {'type': 'integer'}, 'role': {'type': 'string', 'enum': ROLES}}, 'required': ['id', 'role'], 'additionalProperties': False}}, 'test': {'type': 'object', 'properties': {'action': {'type': 'string', 'pattern': '^ACTION[1-7]( [0-9]{1,2} [0-9]{1,2})?$'}, 'object': {'type': 'integer'}, 'change': {'type': 'string', 'enum': ['moved', 'appeared', 'disappeared', 'recoloured', 'nothing']}, 'direction': {'type': 'string', 'enum': ['up', 'down', 'left', 'right', 'none']}}, 'required': ['action', 'object', 'change', 'direction'], 'additionalProperties': False}}, 'required': ['rule', 'controlled', 'goal', 'roles', 'test'], 'additionalProperties': False}
+OBJECT_SCHEMA = {'type': 'object', 'properties': {'rule': {'type': 'string', 'maxLength': 400}, 'controlled': {'type': 'array', 'maxItems': 8, 'items': {'type': 'integer'}}, 'goal_choice': {'type': 'integer', 'minimum': 0, 'maximum': 9}, 'goal': {'type': 'string', 'maxLength': 250}, 'roles': {'type': 'array', 'maxItems': 16, 'items': {'type': 'object', 'properties': {'id': {'type': 'integer'}, 'role': {'type': 'string', 'enum': ROLES}}, 'required': ['id', 'role'], 'additionalProperties': False}}, 'test': {'type': 'object', 'properties': {'action': {'type': 'string', 'pattern': '^ACTION[1-7]( [0-9]{1,2} [0-9]{1,2})?$'}, 'object': {'type': 'integer'}, 'change': {'type': 'string', 'enum': ['moved', 'appeared', 'disappeared', 'recoloured', 'nothing']}, 'direction': {'type': 'string', 'enum': ['up', 'down', 'left', 'right', 'none']}}, 'required': ['action', 'object', 'change', 'direction'], 'additionalProperties': False}}, 'required': ['rule', 'controlled', 'goal_choice', 'goal', 'roles', 'test'], 'additionalProperties': False}
 
 class Hypothesis(NamedTuple):
     """The advisor's explanation of the game in terms of scene object ids, plus one experiment."""
@@ -1626,6 +1879,7 @@ class Hypothesis(NamedTuple):
     test_object: int
     test_change: str
     test_direction: str
+    goal_choice: int = 0
 
     def prediction(self) -> str:
         if self.test_change == 'nothing':
@@ -1637,7 +1891,7 @@ def parse_hypothesis(text: str, available: list[int]) -> Hypothesis | None:
         data = json.loads(text[text.index('{'):text.rindex('}') + 1])
         test = data['test']
         tests = parse_plan(json.dumps({'plan': [test['action']]}), available)
-        return Hypothesis(str(data['rule']), [int(i) for i in data['controlled']], str(data['goal']), {int(r['id']): str(r['role']) for r in data['roles']}, tests[0] if tests else None, int(test['object']), str(test['change']), str(test['direction']))
+        return Hypothesis(str(data['rule']), [int(i) for i in data['controlled']], str(data['goal']), {int(r['id']): str(r['role']) for r in data['roles']}, tests[0] if tests else None, int(test['object']), str(test['change']), str(test['direction']), int(data.get('goal_choice', 0)))
     except (ValueError, KeyError, TypeError):
         return None
 
@@ -1858,7 +2112,7 @@ class PromptWriter:
         parts.append('Current screen (row number, then 64 hex digits for x=0..63):\n' + self.render_grid(grid))
         return '\n'.join(parts)
 
-    def object_question(self, scene: LevelScene, relations: list[str], observations: list[Observation], history: list[str], available: list[int]) -> str:
+    def object_question(self, scene: LevelScene, relations: list[str], observations: list[Observation], history: list[str], available: list[int], goals: list[GoalCandidate] | None=None, purposes: list[str] | None=None) -> str:
         """The question in terms of objects: what is on screen, what the brain noticed, what actions did."""
         m = self.memory
         level = m.level if m.level is not None else 0
@@ -1870,6 +2124,10 @@ class PromptWriter:
             parts.append('What the most recent actions did (oldest first):\n' + '\n'.join((f'  {o.describe()}' for o in observations)))
         else:
             parts.append('No action has been taken on this level yet.')
+        if purposes:
+            parts.append('How objects have reacted to actions so far:\n' + '\n'.join((f'  {p}' for p in purposes)))
+        if goals:
+            parts.append('POSSIBLE GOALS, most likely first (by shape and by what reacts):\n' + '\n'.join((f'  {i}. {g.describe()}' for i, g in enumerate(goals, 1))))
         if history:
             parts.append('Your earlier explanations and how their tests turned out:\n' + '\n'.join((f'  {h}' for h in history)))
         return '\n'.join(parts)
@@ -2014,13 +2272,15 @@ class Brain:
         self.touch_learner = TouchLearner(self.world)
         self.action_learner = ActionLearner(self.world)
         self.death_judge = DeathJudge(self.world)
-        self.goals = GoalTracker(self.world)
+        self.goals = Goals(self.world)
         self.explorer = Explorer(self.world, self.memory, self.goals, self.rng, self.stats, self.restart_level)
         self.prompt = PromptWriter(self.world, self.memory, self.stats)
         self.tracer = Tracer.for_game(name)
         self.mode = os.environ.get('ARC3_LLM_MODE', LLM_MODE)
         self.scene = SceneTracker(self.world) if self.mode == 'hypothesis' else None
         self.lab = Lab()
+        self.goal_board = GoalBoard()
+        self.goal_list: list = []
         self._traced_verdicts = 0
 
     def next_action(self, state: str, frame_layers, levels_completed: int, available: list[int], full_reset: bool=False) -> Action:
@@ -2145,14 +2405,17 @@ class Brain:
         scene = self.scene.scene(m.level)
         wholes = [o for o in scene.objects if scene.root(o.id) == o.id]
         relations = scene.remember_relations(RelationFinder.find(wholes, *grid.shape))
-        question = self.prompt.object_question(scene, relations, list(scene.observations)[-12:], self.lab.history, available)
+        self.goal_list = self.goal_board.possible_goals(scene)
+        question = self.prompt.object_question(scene, relations, list(scene.observations)[-12:], self.lab.history, available, self.goal_list, Goals.purposes(scene))
         self.stats['llm_questions'] += 1
         hypothesis = adviser.hypothesise(question, available, tag=self.name)
         self.lab.next_ask_at = self.stats['actions'] + LLM_ASK_EVERY
         if hypothesis is None or hypothesis.test_action is None:
             return None
         self.lab.latest = self.lab.pending = hypothesis
-        m.theory = f'{hypothesis.rule} | goal: {hypothesis.goal} | controlled: {hypothesis.controlled}'
+        self.goal_board.vote(self.goal_list, hypothesis.goal_choice)
+        chosen = self.goal_board.chosen.describe() if self.goal_board.chosen else hypothesis.goal
+        m.theory = f'{hypothesis.rule} | goal: {chosen} | controlled: {hypothesis.controlled}'
         m.why = f'LLM test: expects {hypothesis.prediction()}'
         m.route, m.expected_screen = ([], None)
         self.stats['llm_actions'] += 1
@@ -2269,6 +2532,9 @@ class Brain:
         self.stats['level_ups'] += 1
         if self.lab.pending is not None:
             self.lab.record('the test action FINISHED THE LEVEL')
+        if self.scene is not None and m.level is not None:
+            self.goal_board.learn_from_win(self.scene.scene(m.level))
+            self.goal_board.chosen = None
         m.plan = []
         if m.last_action not in (None, RESET_ACTION):
             assert m.last_action is not None

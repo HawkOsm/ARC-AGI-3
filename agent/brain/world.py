@@ -2,7 +2,7 @@
 
 It starts almost empty and fills up as the agent plays. Code never changes per game; only these
 beliefs do. The classes here hold data and answer read-only questions about it; the learners
-(look.FirstLook, learn.*Learner, goals.GoalTracker) are the only code that writes them.
+(look.FirstLook, learn.*Learner, goals.Goals) are the only code that writes them.
 
     World                 the root: one per game
       .counters           CounterMemory   HUD step-counter pixels, ignored when comparing screens

@@ -4,6 +4,26 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-26 — Goals as a ranked list of shape correspondences; the LLM picks (local 4B, ar25)
+- Change: owner's direction — goals come from object purposes and shapes, not a list of genres. `shapes.py`: pairwise
+  correspondences between object kinds (identical / turned or flipped / scaled / fills a gap / fits inside / same
+  colour), bounded (kinds, not pairs; <=3 relations per object; cached per level). `goals.py`: `GoalTracker` renamed
+  `Goals` (owner); `GoalBoard.possible_goals()` = correspondence pairs (+ "clear all copies" for kinds with >=3
+  copies), ranked by shape strength x reacts-to-actions x LLM picks x relation kinds that held at earlier wins;
+  `Goals.purposes()` (how each object reacted per action), `Goals.progress_text()`. The object question now shows the
+  ranked list and purposes; the answer has `goal_choice` (a number, 0 = none); the pick re-ranks the list.
+- Command: shape relations on all 25 first screens (timing); `eval/debug_run.py ar25 --hypothesis --steps 80`.
+- Result: first version of the relations exploded (tr87 521 relations, 216 ms: rectangles "fit" every frame) ->
+  tightened (irregular pieces only for fills-gap, snug fits-inside, 3 per object): worst tr87 41 relations, 118 ms,
+  most games < 20 ms. ar25: the brain's list has "#5 and #6 overlap (same shape)" at #1 from the first screen; the 4B
+  model **picked it in 15 of 20 answers** (before the list it never named the yellow block in 40 answers) and named
+  #5 as controlled. Prompt median 2,267 tokens (hex question ~4,700), answers 4.3 s median. Progress for the picked
+  goal: distance 33-55 -> 4.2 cells, box overlap 1.00 near the end by chance (the brain still explores; step 2 steers).
+  Tests 7/13 correct this run. 0 levels.
+- Verdict: INFO — the right goal is now found and picked on ar25; next: steer the brain toward it (exact coverage,
+  not box overlap). `_is_just_moving` removal (owner) still pending, as its own measured change (it alters the default
+  brain's win learning).
+
 ## 2026-09-26 — Hypothesis mode, step 1 (object questions + tested predictions), local 4B on ar25
 - Change: `agent/brain/scene.py` (numbered objects with ids kept through movement, twins, partial covering and
   splits; composites = parts that moved together touching >=2 times and never apart; relations: mirror images across

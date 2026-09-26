@@ -24,7 +24,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from .goals import GoalTracker
+from .goals import Goals
 from .look import Blob, ScreenReader
 from .settings import (
     CHANCE_IF_KNOWN_DEADLY,
@@ -66,7 +66,7 @@ from .world import (
 class Explorer:
     """Picks the next action from the beliefs. Writes only short-term memory (route) and stats."""
 
-    def __init__(self, world: World, memory: WorkingMemory, goals: GoalTracker, rng: random.Random,
+    def __init__(self, world: World, memory: WorkingMemory, goals: Goals, rng: random.Random,
                  stats: defaultdict[str, int], restart: Callable[[], Action]) -> None:
         self.world = world
         self.memory = memory

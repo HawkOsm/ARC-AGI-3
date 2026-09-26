@@ -62,7 +62,7 @@ compiler (rules in AGENT.md "Code style").
 | `agent/brain/world.py` | the model: typed belief classes (`World`, `AvatarBelief`, `LevelMemory`, `Screen`, `Goal`, ...), enums, `WorkingMemory` | you wonder "where is X stored" |
 | `agent/brain/look.py` | `ScreenReader` (objects, changed blobs), `FirstLook` | perception questions |
 | `agent/brain/learn.py` | the learners, only writers of beliefs: `CounterLearner`, `AvatarLearner`, `TouchLearner`, `ActionLearner`, `DeathJudge` | the agent believes something wrong |
-| `agent/brain/goals.py` | `ScreenFeatures`, `GoalTracker`: goals from what changed when a level was won | goal questions |
+| `agent/brain/goals.py` | `ScreenFeatures`, `Goals`: goals from what changed when a level was won | goal questions |
 | `agent/brain/decide.py` | `Explorer`: reads beliefs, picks the action (exploration frontier) | the agent does something dumb |
 | `agent/brain/llm.py` | **the LLM advisor**: `Advisor` (HTTP client, shared pause, in-flight limit), `PromptWriter`, `parse_plan` → `Advice(plan, theory)` | LLM questions |
 | `agent/brain/trace.py` | `Tracer`: writes every step (screen, action, who chose it and why, what happened) when `ARC3_TRACE_DIR` is set | "what is it actually doing?" |

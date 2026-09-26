@@ -72,6 +72,11 @@ class StepPrinter:
                                  for _cost, d, p, a in weighed)
             print(f"{c.dim}      weighed  {options}{c.end}")
         print(f"      result   {result}")
+        chosen = brain.goal_board.chosen
+        if chosen is not None and brain.scene is not None and brain.memory.level is not None:
+            from agent.brain.goals import Goals
+            progress = Goals.progress_text(brain.scene.scene(brain.memory.level), chosen)
+            print(f"{c.dim}      goal     {chosen.describe()} -> {progress}{c.end}")
         for line in news:
             print(line)
         if new_screen:
@@ -96,8 +101,15 @@ class StepPrinter:
         h = lab.latest
         if h is not None and h is not self.last_hypothesis:
             roles = ", ".join(f"#{i} {r}" for i, r in h.roles.items())
+            board = self.brain.goal_list
+            lines.append(f"      {c.dim}possible goals (brain's ranking):{c.end}")
+            lines += [f"      {c.dim}  {i}. {g.describe()}  [score {g.score:.2f}]{c.end}"
+                      for i, g in enumerate(board[:6], 1)]
+            picked = f"#{h.goal_choice} = {board[h.goal_choice - 1].describe()}" \
+                if 1 <= h.goal_choice <= len(board) else "none of the list"
             lines += [f"      {c.pink}LLM rule: {h.rule}{c.end}",
-                      f"      {c.pink}    controlled {h.controlled} · goal: {h.goal}{c.end}",
+                      f"      {c.pink}    controlled {h.controlled} · picked goal {picked}{c.end}",
+                      f"      {c.pink}    in its words: {h.goal}{c.end}",
                       f"      {c.pink}    roles: {roles}{c.end}"]
             self.last_hypothesis, self.last_theory = h, m.theory
         elif m.theory and m.theory != self.last_theory:

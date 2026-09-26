@@ -4,7 +4,7 @@ Every step (Brain.next_action):
     1. LOOK     the frame arrives -> settled picture                    (look.ScreenReader)
     2. EVENTS   died? level up? new play?  (the level change is the only real reward)
     3. LEARN    first screen of a level? take a first look                (look.FirstLook)
-                What did my last action do? update the beliefs          (learn.*Learner, goals.GoalTracker)
+                What did my last action do? update the beliefs          (learn.*Learner, goals.Goals)
     4. DECIDE   follow the LLM advisor's plan if one is on               (llm.Advisor)
                 otherwise pick the next action from the beliefs           (decide.Explorer)
 
@@ -20,7 +20,7 @@ from collections import defaultdict, deque
 import numpy as np
 
 from .decide import Explorer
-from .goals import GoalTracker, ScreenFeatures
+from .goals import GoalBoard, Goals, ScreenFeatures
 from .learn import ActionLearner, AvatarLearner, CounterLearner, DeathJudge, TouchLearner
 from .llm import Lab, PromptWriter, advisor
 from .look import FirstLook, ScreenReader
@@ -57,7 +57,7 @@ class Brain:
         self.touch_learner = TouchLearner(self.world)
         self.action_learner = ActionLearner(self.world)
         self.death_judge = DeathJudge(self.world)
-        self.goals = GoalTracker(self.world)
+        self.goals = Goals(self.world)
         # the deciders
         self.explorer = Explorer(self.world, self.memory, self.goals, self.rng, self.stats, self.restart_level)
         self.prompt = PromptWriter(self.world, self.memory, self.stats)
@@ -66,6 +66,8 @@ class Brain:
         self.mode = os.environ.get("ARC3_LLM_MODE", LLM_MODE)
         self.scene = SceneTracker(self.world) if self.mode == "hypothesis" else None
         self.lab = Lab()
+        self.goal_board = GoalBoard()
+        self.goal_list: list = []  # the last list of possible goals shown to the LLM (for debug output)
         self._traced_verdicts = 0
 
     # ── public ──────────────────────────────────────────────────────────────
@@ -204,15 +206,18 @@ class Brain:
         scene = self.scene.scene(m.level)
         wholes = [o for o in scene.objects if scene.root(o.id) == o.id]
         relations = scene.remember_relations(RelationFinder.find(wholes, *grid.shape))
-        question = self.prompt.object_question(scene, relations,
-                                               list(scene.observations)[-12:], self.lab.history, available)
+        self.goal_list = self.goal_board.possible_goals(scene)
+        question = self.prompt.object_question(scene, relations, list(scene.observations)[-12:], self.lab.history,
+                                               available, self.goal_list, Goals.purposes(scene))
         self.stats["llm_questions"] += 1
         hypothesis = adviser.hypothesise(question, available, tag=self.name)
         self.lab.next_ask_at = self.stats["actions"] + LLM_ASK_EVERY
         if hypothesis is None or hypothesis.test_action is None:
             return None
         self.lab.latest = self.lab.pending = hypothesis
-        m.theory = f"{hypothesis.rule} | goal: {hypothesis.goal} | controlled: {hypothesis.controlled}"
+        self.goal_board.vote(self.goal_list, hypothesis.goal_choice)
+        chosen = self.goal_board.chosen.describe() if self.goal_board.chosen else hypothesis.goal
+        m.theory = f"{hypothesis.rule} | goal: {chosen} | controlled: {hypothesis.controlled}"
         m.why = f"LLM test: expects {hypothesis.prediction()}"
         m.route, m.expected_screen = [], None
         self.stats["llm_actions"] += 1
@@ -338,6 +343,9 @@ class Brain:
         self.stats["level_ups"] += 1
         if self.lab.pending is not None:
             self.lab.record("the test action FINISHED THE LEVEL")
+        if self.scene is not None and m.level is not None:
+            self.goal_board.learn_from_win(self.scene.scene(m.level))
+            self.goal_board.chosen = None
         m.plan = []
         if m.last_action not in (None, RESET_ACTION):
             assert m.last_action is not None

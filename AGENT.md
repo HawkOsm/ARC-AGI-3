@@ -138,7 +138,7 @@ agent/brain/
                              FirstLook (a level's inventory: item kinds with purpose "?", patterns)
   learn.py         LEARNERS- the only writers of beliefs: CounterLearner, AvatarLearner, TouchLearner,
                              ActionLearner, DeathJudge
-  goals.py         GOALS   - ScreenFeatures (static), GoalTracker (goals from wins, progress toward them)
+  goals.py         GOALS   - ScreenFeatures (static), Goals (goals from wins, progress toward them)
   decide.py        DECIDER - Explorer: reads beliefs, picks the next action
   llm.py           ADVISOR - Advisor (HTTP client to a local vLLM server), PromptWriter, parse_plan
   brain.py         ORCHESTRATOR - Brain: look -> events -> learn -> decide (read this first)
@@ -173,7 +173,7 @@ The beliefs (`world.py`):
 | `world.actions` | per action: changes the screen? undo? reverses another? no-op / deadly at a position? | `learn.ActionLearner` | yes |
 | `world.rules` | steps per life | `learn.DeathJudge` | yes |
 | `world.levels[n]` | the first-look inventory (`items`) and the map: every screen seen and what each action did on it | `look.FirstLook`, `Brain._record_move` | per level |
-| `world.goals` | what finishes a level, as the game showed it: feature changes (colour counts, colour-colour touches, what the avatar touches) between a level's first screen and its winning screen; confirmed or contradicted by every later win | `goals.GoalTracker` (from wins; weak first-look cues) | yes |
+| `world.goals` | what finishes a level, as the game showed it: feature changes (colour counts, colour-colour touches, what the avatar touches) between a level's first screen and its winning screen; confirmed or contradicted by every later win | `goals.Goals` (from wins; weak first-look cues) | yes |
 | `world.deaths` | real deaths, re-judged as timeouts when a budget appears | `Brain._on_death` | — |
 
 One step (`Brain.next_action`):
