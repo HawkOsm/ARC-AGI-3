@@ -146,6 +146,7 @@ _LOCAL_ANALYZER_TEMPERATURE = _get_env_float("LOCAL_ANALYZER_TEMPERATURE", 0.6)
 _LOCAL_ANALYZER_TOP_P = _get_env_float("LOCAL_ANALYZER_TOP_P", 0.95)
 _LOCAL_ANALYZER_TOP_K = _get_env_int("LOCAL_ANALYZER_TOP_K", 20)
 _LOCAL_ANALYZER_SEED = _get_env_int("LOCAL_ANALYZER_SEED", -1)
+_BRAIN_HINTS = _get_env_bool("DUCK_BRAIN_HINTS", False)  # ARC-AGI-3 repo addition: expose `brain_hints`
 _REQUEST_SAFETY_MARGIN_TOKENS = 512
 _CONTEXT_OVERFLOW_RETRY_TRIM_TOKENS = 512
 _PERSISTENT_HISTORY_ASSISTANT_TURNS = 30
@@ -356,6 +357,9 @@ def _build_system_prompt(*, tool_output_tokens: int) -> str:
     prompt += VISUAL_GAME_ADDENDUM
     prompt += PYTHON_ADDENDUM
     prompt += COMPACT_TOOL_SESSION_ADDENDUM.format(tool_output_tokens=tool_output_tokens)
+    if _BRAIN_HINTS:  # ARC-AGI-3 repo addition
+        from inference.agent.prompts import BRAIN_HINTS_ADDENDUM
+        prompt += BRAIN_HINTS_ADDENDUM
     return prompt
 
 
@@ -1479,7 +1483,7 @@ class ToolAgent:
                 if isinstance(last_action_result, dict)
                 else self._last_action_result
             )
-            return {
+            payload_state = {
                 "current_frame": current_frame_payload,
                 "history": _ascii_history_view_payload(refreshed_history),
                 "valid_actions": sanitized_actions,
@@ -1489,6 +1493,15 @@ class ToolAgent:
                     else {}
                 ),
             }
+            if _BRAIN_HINTS:  # ARC-AGI-3 repo addition (agent/duck/hints.py): our brain's findings for the model
+                from agent.duck.hints import hints_for
+                import numpy as _np
+                payload_state["brain_hints"] = hints_for(
+                    str(state_path),
+                    [(entry.action, _np.array(entry.frame.grid, dtype=_np.uint8), entry.frame.level)
+                     for entry in refreshed_history],
+                )
+            return payload_state
 
         terminal_action_result: dict[str, Any] | None = None
 

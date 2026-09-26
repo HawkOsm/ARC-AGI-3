@@ -1,0 +1,26 @@
+{
+  "language": "python",
+  "kernel_type": "notebook",
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "dataset_sources": [
+    "keithtyser/duck-qwen38-nvfp4-mtp-vllm-smoke-v1",
+    "keithtyser/qwen38-flash-next-vllm-nvfp4-runtime-v1",
+    "hawkosm/arc3-duck-hints"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [
+    "arc-prize-2026-arc-agi-3"
+  ],
+  "model_sources": [
+    "keithtyser/qwen3-8-flash-next-nvfp4/PyTorch/radixark-modelopt-fp4/1"
+  ],
+  "machine_shape": "NvidiaRtxPro6000",
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:57e612b484cf3df5026ee4dcc3cb176974b22b2bc0937fb1e16132a8be4cb13c",
+  "id": "hawkosm/duck-flashnext-hints",
+  "title": "duck-flashnext-hints",
+  "code_file": "duck_hints.ipynb",
+  "is_private": true,
+  "keywords": []
+}

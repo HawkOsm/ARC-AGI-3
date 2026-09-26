@@ -37,3 +37,16 @@ loops. No hand-written game logic; everything game-specific is written by the mo
 | model output | free reasoning (thinking on) + Python | one forced-JSON answer, thinking off |
 | memory | model-written world model, carried every turn | brain beliefs + LLM history lines |
 | search / BFS | the model writes it when it understands the goal | the brain's BFS on its own goal list |
+
+## In this repo (2026-09-26)
+| what | where |
+|---|---|
+| the harness, as downloaded (commit 79539cd), then our 28-line diff: `DUCK_BRAIN_HINTS=1` adds `brain_hints` | `vendor/duck/` (`git diff 79539cd -- vendor/duck`) |
+| our findings for the model: control modes, goal candidates by shape, dead clicks, level lessons, new/changed objects, in the Duck's colour letters and row/col boxes; step counters hidden | `agent/duck/hints.py`, `tests/test_duck_hints.py` |
+| run the Duck locally on our vLLM (`make llm-local LLM_VISION=1 LLM_TOOLS=1 LLM_MAX_LEN=32768 LLM_GPU_UTIL=0.93`) | `eval/duck_run.py [--hints]` |
+| Kaggle A: the public Flash-Next notebook unchanged (baseline) | `notebooks/duck_repro/` |
+| Kaggle B: the same + one cell: our dataset first on the path, hints on | `notebooks/duck_hints/`, dataset built by `scripts/build_duck_hints_dataset.py` |
+
+Local smoke (Qwen3.5-4B, 8 GB laptop GPU, 32K context): the harness runs end to end (ar25: 144 actions in 12 min,
+0 levels; with hints 127 actions, 0 levels; the 4B never read `brain_hints`). `brain_hints` verified inside the
+sandbox. The 4B cannot say whether hints help; that needs the Kaggle A/B.

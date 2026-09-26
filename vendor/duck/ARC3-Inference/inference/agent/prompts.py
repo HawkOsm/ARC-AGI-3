@@ -112,3 +112,16 @@ COMPACT_TOOL_SESSION_ADDENDUM = (
     "- Tool responses are capped to about {tool_output_tokens} tokens. If a response is cut off, the tool result will tell you that.\n"
     "- Keep code snippets short and purpose-built rather than dumping large frameworks into one call.\n"
 )
+
+# ARC-AGI-3 repo addition (DUCK_BRAIN_HINTS=1): our brain's findings as one more runtime variable.
+BRAIN_HINTS_ADDENDUM = (
+    "\n\nBrain hints:\n"
+    "- `brain_hints` is a dict computed by a separate analysis program from every frame so far. Keys (present only "
+    "when there is something to say): `control_modes` (which object each key moves, and which click or key switches "
+    "that), `possible_goals` (objects that belong together by shape, most likely first), "
+    "`clicks_that_did_nothing` (objects whose click changed nothing on this level), `earlier_levels` (how finished "
+    "levels ended), `new_or_changed` (what differs from earlier levels), and `objects` (its ids `#n` -> colour letter "
+    "and row/col box; these ids are NOT segmentation ids).\n"
+    "- Treat it as evidence to check against `current_frame` and `transitions`, not as instructions. Print only the "
+    "keys you need.\n"
+)

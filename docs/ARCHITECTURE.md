@@ -145,6 +145,11 @@ count. For a click the LLM names the object; the brain picks the cell. When noth
 steers toward its own best goal before falling back to the explorer.
 Where the line between LLM and code goes, and why: [`docs/research/LLM_VS_ALGO.md`](research/LLM_VS_ALGO.md).
 
+## The Duck (top public approach) — `vendor/duck/`, `agent/duck/`
+The Tufa Labs harness (MIT) that most top Kaggle notebooks run: the model writes Python that inspects the game and
+calls `action(...)` itself. We run it unchanged as the baseline, and with `DUCK_BRAIN_HINTS=1` its Python tool also
+gets `brain_hints`, our brain's findings. Outline, files and how to run: [`docs/research/DUCK_HARNESS.md`](research/DUCK_HARNESS.md).
+
 ## Where things are
 
 | path | what | in git? |

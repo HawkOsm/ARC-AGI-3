@@ -3,6 +3,7 @@ public Kaggle notebooks run, pointed at `make llm-local LLM_VISION=1 LLM_TOOLS=1
 
     .venv/bin/python eval/duck_run.py --games ar25,tn36 --minutes 10 --concurrency 2
     .venv/bin/python eval/duck_run.py --games all --minutes 8 --concurrency 4 --label duck_local
+    .venv/bin/python eval/duck_run.py --games ar25 --minutes 10 --hints      # + our brain's findings
 
 Writes the harness's own run folder (per-game JSON, transcripts) under .claude/scratch/duck/runs/<label>/ and prints
 levels and actions per game. The local 4B model is far weaker than Kaggle's 27B+: this checks the plumbing, not the
@@ -23,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DUCK = ROOT / "vendor" / "duck"
 
 
-def configure_environment(base_url: str, model: str, context: int, thinking: bool) -> None:
+def configure_environment(base_url: str, model: str, context: int, thinking: bool, hints: bool) -> None:
     """The harness reads these at import time (see vendor/duck/kaggle_setup_commands.original.json)."""
     os.environ.update({
         "LOCAL_ANALYZER_BASE_URL": base_url, "OPENAI_BASE_URL": base_url,
@@ -38,8 +39,9 @@ def configure_environment(base_url: str, model: str, context: int, thinking: boo
         "LOCAL_ANALYZER_ENABLE_THINKING": "true" if thinking else "false",
         "MULTIMODAL_CONTEXT": "current_grid", "MULTIMODAL_UPSCALE": "4",
         "TAAF_MINIMAL_DIAGNOSTICS": "1", "ONLY_RESET_LEVELS": "true",
+        "DUCK_BRAIN_HINTS": "1" if hints else "0",  # our addition: `brain_hints` (agent/duck/hints.py)
     })
-    for entry in (DUCK / "ARC3-Inference", DUCK / "tufa-arc-agi-framework" / "src"):
+    for entry in (ROOT, DUCK / "ARC3-Inference", DUCK / "tufa-arc-agi-framework" / "src"):
         sys.path.insert(0, str(entry))
 
 
@@ -52,8 +54,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--label", default="duck_local")
     ap.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     ap.add_argument("--model", default="qwen", help="served model name")
-    ap.add_argument("--context", type=int, default=16384, help="the harness's context window (evicts beyond it)")
+    ap.add_argument("--context", type=int, default=32768, help="the harness's context window (evicts beyond it)")
     ap.add_argument("--no-thinking", action="store_true")
+    ap.add_argument("--hints", action="store_true", help="give the model our brain's findings (`brain_hints`)")
     return ap.parse_args()
 
 
@@ -106,7 +109,7 @@ def summarize(job_dir: Path) -> None:
 
 def main() -> int:
     args = parse_args()
-    configure_environment(args.base_url, args.model, args.context, not args.no_thinking)
+    configure_environment(args.base_url, args.model, args.context, not args.no_thinking, args.hints)
     started = time.time()
     job_dir = asyncio.run(run(args))
     print(f"done in {time.time() - started:.0f} s; run folder {job_dir}")
