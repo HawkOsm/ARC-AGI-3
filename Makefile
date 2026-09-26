@@ -34,7 +34,7 @@ REPS            ?= 30
 BUDGET          ?= 2000
 
 .PHONY: help setup play-local pull-sample notebook submit status verify-local clean _check-kaggle \
-        build check interface maskcheck eval eval-paired eval-swarm ci
+        build check test interface maskcheck eval eval-paired eval-swarm ci llm-local-setup llm-local eval-llm dashboard
 
 _check-kaggle:
 	@if [ -z "$(KAGGLE_TOKEN_FILE)" ] || [ ! -s "$(KAGGLE_TOKEN_FILE)" ]; then \
@@ -51,7 +51,7 @@ help:
 
 setup: ## One-time install: venv, arc-agi, kaggle CLI, clone framework
 	@[ -x $(VENV_PY) ] || uv venv --python $(PYTHON) $(VENV)
-	$(VENV_PIP) $(ARC_AGI_PIN) "kaggle>=2.2" python-dotenv pandas pyarrow ruff
+	$(VENV_PIP) $(ARC_AGI_PIN) "kaggle>=2.2" python-dotenv pandas pyarrow ruff mypy pytest
 	@if [ ! -d "$(FRAMEWORK_DIR)/.git" ]; then \
 	    mkdir -p vendor && git clone $(FRAMEWORK_REPO) $(FRAMEWORK_DIR); \
 	fi
@@ -102,9 +102,13 @@ clean: ## Remove generated artefacts (venv, downloaded games, vendored repos)
 build: ## Regenerate agent/my_agent.py from agent/brain/
 	$(VENV_PY) scripts/build_submission.py
 
-check: ## Lint + verify agent/my_agent.py is freshly built
+check: ## Lint + type-check agent/brain + verify agent/my_agent.py is freshly built
 	$(VENV)/bin/ruff check .
+	$(VENV)/bin/mypy
 	$(VENV_PY) scripts/build_submission.py --check
+
+test: ## Unit + end-to-end tests of agent/brain (tests/; no network, no GPU)
+	$(VENV_PY) -m pytest tests -q
 
 interface: ## Re-verify the engine/framework facts the agent depends on
 	$(VENV_PY) eval/interface_checks.py
@@ -118,8 +122,33 @@ eval-paired: build ## Paired AGENT vs eval/champion/my_agent.py
 eval-swarm: build ## All games as threads in one process (Kaggle's execution model)
 	$(VENV_PY) eval/run.py --agent $(AGENT) --swarm --max-actions $(BUDGET)
 
+# ── Local LLM for development (small stand-in for Kaggle's Qwen3.8-27B; see docs/ARCHITECTURE.md) ──
+LLM_VENV   := .venv-llm
+LLM_MODEL  ?= models/Qwen3.5-4B-AWQ
+LLM_PORT   ?= 8000
+
+llm-local-setup: ## One-time: vLLM 0.30.0 (same as Kaggle) in .venv-llm + the 4B dev model in models/
+	@[ -x $(LLM_VENV)/bin/python ] || uv venv --python $(PYTHON) $(LLM_VENV)
+	uv pip install --python $(LLM_VENV)/bin/python "vllm==0.30.0"
+	$(VENV_PY) -c "from huggingface_hub import snapshot_download as d; d('cyankiwi/Qwen3.5-4B-AWQ-4bit', revision='ef85d23beb', local_dir='models/Qwen3.5-4B-AWQ')"
+
+llm-local: ## Serve the dev model on :$(LLM_PORT) (same flags as the Kaggle dev notebook); Ctrl-C stops it
+	VLLM_USE_FLASHINFER_SAMPLER=0 VLLM_NO_USAGE_STATS=1 $(LLM_VENV)/bin/python -m vllm.entrypoints.openai.api_server \
+	    --model $(LLM_MODEL) --served-model-name qwen --host 127.0.0.1 --port $(LLM_PORT) \
+	    --language-model-only --max-model-len 16384 --gpu-memory-utilization 0.85 \
+	    --max-num-seqs 32 --max-num-batched-tokens 4096 \
+	    --enable-prefix-caching --reasoning-parser qwen3 \
+	    --structured-outputs-config '{"backend": "xgrammar", "disable_any_whitespace": true, "reasoning_parser": "qwen3"}'
+
+eval-llm: build ## Swarm eval with the advisor on, against `make llm-local` (BUDGET actions per game)
+	ARC3_LLM_URL=http://127.0.0.1:$(LLM_PORT)/v1 ARC3_LLM_LOG=.claude/scratch/llm/local/requests.jsonl ARC3_LLM_MAX_CONCURRENT=8 \
+	    $(VENV_PY) eval/run.py --agent $(AGENT) --swarm --max-actions $(BUDGET) --label llm_local
+
+dashboard: ## Rebuild the run board page from the run files (.claude/scratch/dashboard/arc3-run-board.html)
+	$(VENV_PY) eval/dashboard.py
+
 maskcheck: ## HUD-counter masking == known counter tracks (all characterised games)
 	$(VENV_PY) eval/mask_check.py
 
-ci: check interface maskcheck ## Local superset of CI: lint, build check, interface facts, masks, smoke regression
+ci: check test interface maskcheck ## Local superset of CI: lint, types, build check, tests, interface facts, masks, smoke regression
 	$(VENV_PY) eval/regression_check.py

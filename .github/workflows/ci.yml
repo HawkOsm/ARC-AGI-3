@@ -25,8 +25,11 @@ jobs:
       - name: Starter smoke test (also downloads ls20 + vc33)
         run: make verify-local
 
-      - name: Lint + agent/my_agent.py freshly built from agent/brain/
+      - name: Lint + type-check + agent/my_agent.py freshly built from agent/brain/
         run: make check
+
+      - name: Unit + end-to-end tests (tests/)
+        run: make test
 
       - name: Interface facts the agent depends on
         run: make interface
