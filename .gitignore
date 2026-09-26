@@ -28,3 +28,4 @@ eval/results/
 
 # Downloaded model weights (large; see models/README if present)
 models/
+.venv-llm/
