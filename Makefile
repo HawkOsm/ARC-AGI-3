@@ -34,7 +34,7 @@ REPS            ?= 30
 BUDGET          ?= 2000
 
 .PHONY: help setup play-local pull-sample notebook submit status verify-local clean _check-kaggle \
-        build check test interface maskcheck eval eval-paired eval-swarm ci llm-local-setup llm-local eval-llm dashboard
+        build check test interface maskcheck eval eval-paired eval-swarm ci llm-local-setup llm-local eval-llm dashboard debug
 
 _check-kaggle:
 	@if [ -z "$(KAGGLE_TOKEN_FILE)" ] || [ ! -s "$(KAGGLE_TOKEN_FILE)" ]; then \
@@ -143,6 +143,9 @@ llm-local: ## Serve the dev model on :$(LLM_PORT) (same flags as the Kaggle dev 
 eval-llm: build ## Swarm eval with the advisor on, against `make llm-local` (BUDGET actions per game)
 	ARC3_LLM_URL=http://127.0.0.1:$(LLM_PORT)/v1 ARC3_LLM_LOG=.claude/scratch/llm/local/requests.jsonl ARC3_LLM_MAX_CONCURRENT=8 \
 	    $(VENV_PY) eval/run.py --agent $(AGENT) --swarm --max-actions $(BUDGET) --label llm_local
+
+debug: ## Play ONE game, printing every decision: make debug GAME=ar25 STEPS=150 [LLM=1] (LLM needs make llm-local)
+	$(VENV_PY) eval/debug_run.py $(or $(GAME),ls20) --steps $(STEPS) $(if $(LLM),--llm,)
 
 dashboard: ## Rebuild the run board page from the run files (.claude/scratch/dashboard/arc3-run-board.html)
 	$(VENV_PY) eval/dashboard.py

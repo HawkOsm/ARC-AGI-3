@@ -154,3 +154,14 @@ def test_describe_step_summarises_what_changed():
     assert PromptWriter.describe_step(Action(6, 2, 1), before, after, None) == \
         "ACTION6 2 1 -> 1 cells changed within x=2..2, y=1..1"
     assert PromptWriter.describe_step(Action(1), None, None, "LEVEL COMPLETE") == "ACTION1 -> LEVEL COMPLETE"
+
+
+def test_prompt_never_calls_a_first_look_guess_a_win():
+    from agent.brain.world import Goal
+    world = World()
+    world.goals.append(Goal(feature=("touch", 4, 11), direction=1, support=0, against=0,
+                            source="first look level 0: same shape", prior=0.45))
+    memory = WorkingMemory(level=0, recent=deque(maxlen=16))
+    text = PromptWriter(world, memory, defaultdict(int)).describe(np.zeros((64, 64), dtype=np.uint8), [1])
+    assert "Earlier level completions" not in text and "wins came with" not in text
+    assert "Unconfirmed guess" in text and "No level has been won yet" in text

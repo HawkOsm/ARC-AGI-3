@@ -258,8 +258,14 @@ class PromptWriter:
         if roles:
             parts.append("Touching colours seemed to: "
                          + ", ".join(f"{c:x}={r.value}" for c, r in sorted(roles.items())) + ".")
-        if world.goals:
-            parts.append("Earlier wins came with: " + "; ".join(self._goal_text(g) for g in world.goals[:4]) + ".")
+        won = [g for g in world.goals if g.source.startswith("won")]
+        guesses = [g for g in world.goals if not g.source.startswith("won")]
+        if won:  # only real level completions are presented as evidence
+            parts.append("Earlier level completions came with: " + "; ".join(self._goal_text(g) for g in won[:4]) + ".")
+        if guesses:
+            parts.append("Unconfirmed guess from the first look (one shape appears in several colours): maybe "
+                         + "; ".join(self._goal_text(g) for g in guesses[:2]) + ". No level has been won yet"
+                         if not won else "Unconfirmed guess: " + "; ".join(self._goal_text(g) for g in guesses[:2]))
         if level_map is not None:
             parts.append(f"Distinct screens seen on this level: {len(level_map.screens)}.")
         if m.recent:

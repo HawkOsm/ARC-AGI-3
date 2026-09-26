@@ -74,6 +74,9 @@ class Explorer:
         self.rng = rng
         self.stats = stats
         self.restart = restart  # Brain.restart_level: RESET with the bookkeeping it needs
+        # Debug runs (eval/debug_run.py) set this to [] to see every option plan_route weighed:
+        # (cost = expected actions per new screen, walking distance, chance, action). None = off.
+        self.considered: list[tuple[float, int, float, Action]] | None = None
 
     # ── what to do next ─────────────────────────────────────────────────────
 
@@ -105,6 +108,8 @@ class Explorer:
         budget = world.rules.steps_per_life.get(m.level) if m.level is not None else None
         steps_left = float("inf") if budget is None else budget - 1 - m.life_length
         here = self._best_untried(screen, m.came_by, available)
+        if self.considered is not None and here is not None:
+            self.considered.append((self._route_cost(0, here[0]), 0, here[0], here[1]))
         if here is not None and here[0] >= TAKE_LOCAL_IF_CHANCE_AT_LEAST and steps_left >= 1:
             m.route_reason = f"explore: best untried action on this screen (chance of a new screen {here[0]:.2f})"
             return [(here[1], None)]
@@ -128,6 +133,8 @@ class Explorer:
             cost = self._route_cost(d, option[0]) * (1 + self.rng.random() * 1e-3)
             if world.goals:  # screens that moved toward what the game rewards are explored first
                 cost /= 1 + GOAL_WEIGHT * self.goals.progress(level_map, level_map.screens[other_id])
+            if self.considered is not None:
+                self.considered.append((cost, d, option[0], option[1]))
             if cost < best_cost:
                 best_cost, best = cost, (other_id, option[1])
         if best is None:

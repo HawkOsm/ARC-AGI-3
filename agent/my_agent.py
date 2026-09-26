@@ -1087,6 +1087,7 @@ class Explorer:
         self.rng = rng
         self.stats = stats
         self.restart = restart
+        self.considered: list[tuple[float, int, float, Action]] | None = None
 
     def choose(self, level_map: LevelMemory, screen: Screen, available: list[int]) -> Action:
         m = self.memory
@@ -1116,6 +1117,8 @@ class Explorer:
         budget = world.rules.steps_per_life.get(m.level) if m.level is not None else None
         steps_left = float('inf') if budget is None else budget - 1 - m.life_length
         here = self._best_untried(screen, m.came_by, available)
+        if self.considered is not None and here is not None:
+            self.considered.append((self._route_cost(0, here[0]), 0, here[0], here[1]))
         if here is not None and here[0] >= TAKE_LOCAL_IF_CHANCE_AT_LEAST and (steps_left >= 1):
             m.route_reason = f'explore: best untried action on this screen (chance of a new screen {here[0]:.2f})'
             return [(here[1], None)]
@@ -1139,6 +1142,8 @@ class Explorer:
             cost = self._route_cost(d, option[0]) * (1 + self.rng.random() * 0.001)
             if world.goals:
                 cost /= 1 + GOAL_WEIGHT * self.goals.progress(level_map, level_map.screens[other_id])
+            if self.considered is not None:
+                self.considered.append((cost, d, option[0], option[1]))
             if cost < best_cost:
                 best_cost, best = (cost, (other_id, option[1]))
         if best is None:
@@ -1435,8 +1440,12 @@ class PromptWriter:
         roles = {c: r.most_common(1)[0][0] for c, r in world.colour_roles.evidence.items() if r}
         if roles:
             parts.append('Touching colours seemed to: ' + ', '.join((f'{c:x}={r.value}' for c, r in sorted(roles.items()))) + '.')
-        if world.goals:
-            parts.append('Earlier wins came with: ' + '; '.join((self._goal_text(g) for g in world.goals[:4])) + '.')
+        won = [g for g in world.goals if g.source.startswith('won')]
+        guesses = [g for g in world.goals if not g.source.startswith('won')]
+        if won:
+            parts.append('Earlier level completions came with: ' + '; '.join((self._goal_text(g) for g in won[:4])) + '.')
+        if guesses:
+            parts.append('Unconfirmed guess from the first look (one shape appears in several colours): maybe ' + '; '.join((self._goal_text(g) for g in guesses[:2])) + '. No level has been won yet' if not won else 'Unconfirmed guess: ' + '; '.join((self._goal_text(g) for g in guesses[:2])))
         if level_map is not None:
             parts.append(f'Distinct screens seen on this level: {len(level_map.screens)}.')
         if m.recent:

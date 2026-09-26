@@ -4,6 +4,18 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-26 — Local 4B LLM fully in charge (after the queueing fix) + ar25 debug run
+- Change: advisor with an in-flight limit (8 locally) so the opening burst no longer times out and pauses it;
+  `eval/debug_run.py` / `make debug` (one game, a printed block per decision: action, who/why, options weighed,
+  result); prompt fix: first-look guesses were presented to the LLM as "Earlier wins came with ...".
+- Commands: `make eval-llm BUDGET=200` (25 games, swarm, seed 0) vs `eval/run.py --swarm --max-actions 200 --seed 0`;
+  `eval/debug_run.py ar25 --llm --steps 120 --trace`.
+- Result: **LLM 4B: 2 levels / 0.170 vs brain 6 levels / 0.251** at 200 actions per game. ar25 with the LLM: all 120
+  actions from the LLM (77 questions, 453 s), 0 levels, 64/120 actions changed nothing; its theory never mentions the
+  mirror/reflection (owner's reading of ar25: a grey L-shape and a yellow goal mirrored across a middle line) and kept
+  citing "previous wins" that were only the first-look guess (prompt bug, fixed + test).
+- Verdict: ❌ the 4B model in charge is worse than the brain; kept only as a development stand-in.
+
 ## 2026-09-26 — Visibility: tests, Run Board, Agent Replay (owner: "I need to see what is going on")
 - Change: `tests/` (pytest, 29 tests: model, reader, advisor against a fake server, brain playing ls20/vc33; `make test`,
   in `make ci` and GitHub CI). `eval/dashboard.py` → Run Board page. `agent/brain/trace.py` + `eval/trace_viewer.py` →
