@@ -135,7 +135,15 @@ local LLM after the community research) and must pass the same promotion rule as
  level won ────► LESSON  what was brought onto what, what the keys controlled -> next level's question + ranking
 ```
 
-The LLM is asked every few brain actions, and at once after a surprise; never while steering is under way.
+The LLM is asked only on EVENTS, never on a clock and never while steering is under way: the level's probes are
+done, a surprise (a click / switch doing something new — this may interrupt the probes), a goal reached while the
+level goes on or reached without ending it, steering stopped, a life was lost, or
+exploring found 3+ new screens since its last answer. The question starts with "YOU ARE ASKED NOW BECAUSE ...".
+Its test action is not run when the brain already knows the result (same action on this screen, a click on an
+object whose click did nothing, a key effect the control map already shows); its explanation and goal pick still
+count. For a click the LLM names the object; the brain picks the cell. When nothing is being steered, the brain
+steers toward its own best goal before falling back to the explorer.
+Where the line between LLM and code goes, and why: [`docs/research/LLM_VS_ALGO.md`](research/LLM_VS_ALGO.md).
 
 ## Where things are
 

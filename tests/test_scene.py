@@ -179,3 +179,26 @@ def test_goal_board_keeps_reached_goals_and_prefers_won_colours():
     assert board.possible_goals(scene)[0].score == 6 * before  # (1 + 2 x won pair) x (1 + won target colour)
     board.done.append((grey, yellow))
     assert all(grey not in (c.a, c.b) for c in board.possible_goals(scene))
+
+
+def test_a_click_test_without_coordinates_clicks_the_named_object():
+    from agent.brain.llm import CLICK_OBJECT
+    text = ('{"rule": "r", "controlled": [], "goal_choice": 0, "goal": "g", "roles": [], '
+            '"test": {"action": "ACTION6", "object": 7, "change": "recoloured", "direction": "none"}}')
+    h = parse_hypothesis(text, [6])
+    assert h is not None and h.test_action == CLICK_OBJECT and h.test_object == 7
+    assert parse_hypothesis(text, [1, 2]).test_action is None  # no clicks in this game
+
+
+def test_goal_board_offers_reaching_what_the_llm_called_a_goal():
+    from agent.brain.goals import GoalBoard
+    t = _tracker()
+    t.update(0, _screen(13), None)
+    t.update(0, _screen(14), Action(4))  # grey and black moved: they react
+    scene = t.scene(0)
+    grey = next(o.id for o in scene.objects if o.colour == 4)
+    line = next(o.id for o in scene.objects if o.colour == 10)
+    board = GoalBoard()
+    board.controlled, board.roles = {grey}, {line: "goal"}
+    reach = [g for g in board.possible_goals(scene) if g.relation == "reach"]
+    assert [(g.a, g.b) for g in reach] == [(grey, line)]

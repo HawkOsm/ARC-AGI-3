@@ -98,7 +98,7 @@ LLM_SAMPLING_THINKING = {'temperature': 1.0, 'top_p': 0.95, 'top_k': 20, 'presen
 LLM_STRUCTURED_OUTPUT = True
 LLM_PLAN_MAX = 8
 LLM_MODE = 'drive'
-LLM_ASK_EVERY = 4
+LLM_IDLE_NEW_SCREENS = 3
 LLM_HISTORY = 6
 LLM_RECENT_STEPS = 16
 LLM_MAX_CONCURRENT = 32
@@ -1819,11 +1819,12 @@ class GoalBoard:
         self.roles: dict[int, str] = {}
         self.won_pairs: dict[tuple[int, int], int] = {}
         self.done: list[tuple[int, int]] = []
+        self.controlled: set[int] = set()
         self._cache_key: frozenset = frozenset()
         self._cache: list[Correspondence] = []
 
     def new_level(self) -> None:
-        self.chosen, self.roles, self.done = (None, {}, [])
+        self.chosen, self.roles, self.done, self.controlled = (None, {}, [], set())
         self._cache_key = frozenset()
 
     def possible_goals(self, scene: LevelScene) -> list[GoalCandidate]:
@@ -1857,6 +1858,7 @@ class GoalBoard:
             if pair_wins or target_wins:
                 why += ', and earlier levels were won with these colours'
             candidates.append(GoalCandidate(c.relation, c.a, c.b, score, why))
+        candidates += self._reach_goals(scene, reacting, held)
         copies: dict[tuple, list[SceneObject]] = {}
         for o in scene.objects:
             if not o.background and scene.root(o.id) == o.id and (o.size > 1):
@@ -1868,6 +1870,21 @@ class GoalBoard:
                 candidates.append(GoalCandidate('clear', group[0].id, len(group), score, f'{len(group)} identical copies', (group[0].colour, group[0].shape)))
         candidates.sort(key=lambda g: -g.score)
         return candidates[:MAX_GOAL_CANDIDATES]
+
+    def _reach_goals(self, scene: LevelScene, reacting: set[int], held: set[int]) -> list[GoalCandidate]:
+        """The player reaching what the LLM called a goal / collectible / switch (avatar games: no shape pair)."""
+        visible = {o.id for o in scene.objects if scene.root(o.id) == o.id}
+        movers = [i for i in self.controlled if i in visible and i in reacting and (i not in held)]
+        found = []
+        for target, role in self.roles.items():
+            if role not in REACH_ROLES or target not in visible or target in held:
+                continue
+            for mover in movers:
+                if mover != target:
+                    key = ('reach', mover, target)
+                    score = 0.6 * (1 + 0.5 * self.llm_votes.get(key, 0))
+                    found.append(GoalCandidate('reach', mover, target, score, f'the LLM called #{target} a {role}'))
+        return found
 
     def vote(self, candidates: list[GoalCandidate], choice: int) -> None:
         """The LLM picked candidate `choice` (1-based; 0 = none of them): it moves up the list."""
@@ -1884,6 +1901,7 @@ class GoalBoard:
                 self.won_relations[c.relation] = self.won_relations.get(c.relation, 0) + 1
         self._cache_key = frozenset()
 MAX_GOAL_CANDIDATES = 8
+REACH_ROLES = ('goal', 'collectible', 'switch')
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -2480,7 +2498,7 @@ def _near(a: Position, b: Position, margin: int) -> bool:
 
 SYSTEM_PROMPT = 'You are playing an unknown turn-based puzzle game on a 64x64 grid. Nobody tells you the rules or the goal: you find them out by acting and watching what changes.\n\n- Each cell holds a colour 0-15, written as one hex digit 0-f. Row y goes top (0) to bottom (63), column x left (0) to right (63).\n- ACTION1..ACTION5 are simple inputs (often ACTION1=up, ACTION2=down, ACTION3=left, ACTION4=right, ACTION5=use/select, but check the evidence). ACTION6 x y clicks cell (x, y). ACTION7 is usually undo. Only the listed available actions can be used.\n- A level is won by reaching some goal state; the game then shows the next level. Many games have a step counter or lives shown on screen; running out loses the life and restarts the level.\n- Every action counts against you, including ones that change nothing: finish each level in as FEW actions as possible.\n\nAnswer with exactly one JSON object and nothing else:\n{"theory": "<one or two sentences: what the game is and what you are trying>", "plan": ["ACTION4", "ACTION4", "ACTION6 12 30"]}\nThe plan holds 1 to 8 actions to take next, in order.'
 PLAN_SCHEMA = {'type': 'object', 'properties': {'theory': {'type': 'string', 'maxLength': 400}, 'plan': {'type': 'array', 'minItems': 1, 'maxItems': LLM_PLAN_MAX, 'items': {'type': 'string', 'pattern': '^ACTION[1-7]( [0-9]{1,2} [0-9]{1,2})?$'}}}, 'required': ['theory', 'plan'], 'additionalProperties': False}
-OBJECT_SYSTEM_PROMPT = 'You help an agent play an unknown turn-based puzzle game on a 64x64 grid. Nobody knows the rules or the goal. The agent\'s eyes have split the screen into numbered objects (ids stay the same during a level), noticed some relations between them, and recorded exactly what each action did to which object. Your job is to explain the game in terms of these objects and to propose ONE experiment that tests your explanation.\n\n- ACTION1..ACTION5 are simple inputs (often up, down, left, right, use), ACTION6 x y clicks a cell, ACTION7 is often undo. Only the listed actions exist in this game.\n- Every action counts against the player, so the experiment must be informative.\n- Base every claim on the evidence given. If an earlier prediction of yours was wrong, change your explanation.\n\n- Levels of one game share their rule: WHAT FINISHED EARLIER LEVELS tells you what the game rewards; a later level usually asks for the same thing with more targets, new objects or a new twist. Objects marked NEW or CHANGED are that twist: work out what they are for before anything else.\n- Often the keys move one selected object; a click or a switch key changes which one (see control modes).\n- The agent also lists POSSIBLE GOALS: things on screen that belong together by shape (same shape, turned, scaled, a piece that fills a gap in another) or copies that could be cleared. Pick the number of the one you believe finishes the level (goal_choice), or 0 if none fits, and say why in goal.\n\nAnswer with exactly one JSON object:\n{"rule": "<how the game works, in terms of object ids>", "controlled": [ids you believe the player moves], "goal_choice": 1, "goal": "<what must become true to finish the level, in object ids>", "roles": [{"id": 4, "role": "player"}, ...], "test": {"action": "ACTION4", "object": 4, "change": "moved", "direction": "left"}}\ntest.change is what you expect to happen to test.object: moved (give the direction), appeared, disappeared, recoloured, or nothing.'
+OBJECT_SYSTEM_PROMPT = 'You help an agent play an unknown turn-based puzzle game on a 64x64 grid. Nobody knows the rules or the goal. The agent\'s eyes have split the screen into numbered objects (ids stay the same during a level), noticed some relations between them, and recorded exactly what each action did to which object. Your job is to explain the game in terms of these objects and to propose ONE experiment that tests your explanation.\n\n- ACTION1..ACTION5 are simple inputs (often up, down, left, right, use), ACTION6 x y clicks a cell, ACTION7 is often undo. Only the listed actions exist in this game.\n- Every action counts against the player, so the experiment must be informative.\n- Base every claim on the evidence given. If an earlier prediction of yours was wrong, change your explanation.\n\n- Levels of one game share their rule: WHAT FINISHED EARLIER LEVELS tells you what the game rewards; a later level usually asks for the same thing with more targets, new objects or a new twist. Objects marked NEW or CHANGED are that twist: work out what they are for before anything else.\n- Often the keys move one selected object; a click or a switch key changes which one (see control modes).\n- The agent also lists POSSIBLE GOALS: things on screen that belong together by shape (same shape, turned, scaled, a piece that fills a gap in another) or copies that could be cleared. Pick the number of the one you believe finishes the level (goal_choice), or 0 if none fits, and say why in goal.\n\nAnswer with exactly one JSON object:\n{"rule": "<how the game works, in terms of object ids>", "controlled": [ids you believe the player moves], "goal_choice": 1, "goal": "<what must become true to finish the level, in object ids>", "roles": [{"id": 4, "role": "player"}, ...], "test": {"action": "ACTION4", "object": 4, "change": "moved", "direction": "left"}}\ntest.change is what you expect to happen to test.object: moved (give the direction), appeared, disappeared, recoloured, or nothing. To click an object, give test.action "ACTION6" (no coordinates) and its id as test.object: the agent clicks a cell of that object.'
 ROLES = ['player', 'goal', 'mirror-copy', 'mirror-line', 'wall', 'floor', 'pushable', 'collectible', 'hazard', 'switch', 'indicator', 'background', 'decoration', 'unknown']
 OBJECT_SCHEMA = {'type': 'object', 'properties': {'rule': {'type': 'string', 'maxLength': 400}, 'controlled': {'type': 'array', 'maxItems': 8, 'items': {'type': 'integer'}}, 'goal_choice': {'type': 'integer', 'minimum': 0, 'maximum': 9}, 'goal': {'type': 'string', 'maxLength': 250}, 'roles': {'type': 'array', 'maxItems': 16, 'items': {'type': 'object', 'properties': {'id': {'type': 'integer'}, 'role': {'type': 'string', 'enum': ROLES}}, 'required': ['id', 'role'], 'additionalProperties': False}}, 'test': {'type': 'object', 'properties': {'action': {'type': 'string', 'pattern': '^ACTION[1-7]( [0-9]{1,2} [0-9]{1,2})?$'}, 'object': {'type': 'integer'}, 'change': {'type': 'string', 'enum': ['moved', 'appeared', 'disappeared', 'recoloured', 'nothing']}, 'direction': {'type': 'string', 'enum': ['up', 'down', 'left', 'right', 'none']}}, 'required': ['action', 'object', 'change', 'direction'], 'additionalProperties': False}}, 'required': ['rule', 'controlled', 'goal_choice', 'goal', 'roles', 'test'], 'additionalProperties': False}
 
@@ -2500,12 +2518,15 @@ class Hypothesis(NamedTuple):
         if self.test_change == 'nothing':
             return 'nothing changes'
         return f'#{self.test_object} {self.test_change}' + (f' {self.test_direction}' if self.test_change == 'moved' and self.test_direction != 'none' else '')
+CLICK_OBJECT = Action(6, -1, -1)
 
 def parse_hypothesis(text: str, available: list[int]) -> Hypothesis | None:
     try:
         data = json.loads(text[text.index('{'):text.rindex('}') + 1])
         test = data['test']
         tests = parse_plan(json.dumps({'plan': [test['action']]}), available)
+        if not tests and str(test['action']).strip().upper() == 'ACTION6' and (6 in available):
+            tests = [CLICK_OBJECT]
         return Hypothesis(str(data['rule']), [int(i) for i in data['controlled']], str(data['goal']), {int(r['id']): str(r['role']) for r in data['roles']}, tests[0] if tests else None, int(test['object']), str(test['change']), str(test['direction']), int(data.get('goal_choice', 0)))
     except (ValueError, KeyError, TypeError):
         return None
@@ -2519,7 +2540,6 @@ class Lab:
         self.history: list[str] = []
         self.last_verdict = ''
         self.verdicts = 0
-        self.next_ask_at = 0
 
     def record(self, verdict: str) -> None:
         h = self.pending
@@ -2697,6 +2717,7 @@ class Briefing:
     controls: list[str] = field(default_factory=list)
     done: list[str] = field(default_factory=list)
     surprise: str = ''
+    asked_because: list[str] = field(default_factory=list)
 
 class PromptWriter:
     """Writes the question for the advisor from the beliefs and short-term memory (read-only)."""
@@ -2743,6 +2764,8 @@ class PromptWriter:
         level = m.level if m.level is not None else 0
         parts = [f"Level {level + 1}. Lives lost so far: {self.stats['deaths']}. Actions in this game: " + ', '.join((f'ACTION{a}' for a in sorted(available) if a != 0)) + '.']
         b = briefing or Briefing()
+        if b.asked_because:
+            parts.append('YOU ARE ASKED NOW BECAUSE: ' + '; '.join(b.asked_because) + '.')
         if b.wins:
             parts.append('WHAT FINISHED EARLIER LEVELS (the strongest evidence; later levels usually keep the rule, with more or new objects):\n' + '\n'.join((f'  {w}' for w in b.wins)))
         parts.append('Objects on screen now:\n' + '\n'.join((f'  {line}' for line in self._object_lines(scene))))
@@ -2809,9 +2832,13 @@ class PromptWriter:
         return '\n'.join((f'{y:02d} ' + ''.join((f'{v:x}' for v in row)) for y, row in enumerate(grid.tolist())))
 
     @staticmethod
+    def action_name(action: Action) -> str:
+        return f'ACTION6 {action[1]} {action[2]}' if action[0] == 6 else f'ACTION{action[0]}'
+
+    @staticmethod
     def describe_step(action: Action, before: np.ndarray | None, after: np.ndarray | None, outcome: str | None) -> str:
         """One line of history: what an action did."""
-        name = f'ACTION6 {action[1]} {action[2]}' if action[0] == 6 else f'ACTION{action[0]}'
+        name = PromptWriter.action_name(action)
         if outcome is not None:
             return f'{name} -> {outcome}'
         if before is None or after is None:
@@ -2925,7 +2952,9 @@ class Brain:
         self.goal_board.won_pairs = self.lessons.won_pairs
         self.effects_seen: set[tuple] = set()
         self.surprise = ''
-        self.ask_now = False
+        self.ask_reasons: list[str] = []
+        self.level_asked: int | None = None
+        self.screens_at_ask = 0
         self.level_started_at = 0
         self._traced_verdicts = 0
         self.memory_available: list[int] = []
@@ -3065,7 +3094,7 @@ class Brain:
         action = observation.action
         if self.surprise and self.surprise.endswith('then:'):
             self.surprise += ' ' + observation.describe()
-            self.ask_now = True
+            self._want_llm('a click or switch did something new (see SURPRISE)')
             return
         if action[0] in (1, 2, 3, 4) or not observation.changes:
             return
@@ -3084,12 +3113,13 @@ class Brain:
         if follow is not None:
             self.surprise += '; only small marks changed, so the agent pressed a key to see what moves now, then:'
             return
-        self.ask_now = True
+        self._want_llm('a click or switch did something new (see SURPRISE)')
 
     def _experiment(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
-        """Hypothesis mode, in order: probe the level (each key once, one click per object kind); steer the
-        controlled object onto the picked goal; otherwise every LLM_ASK_EVERY brain actions ask the object
-        question and run its test action."""
+        """Hypothesis mode. The LLM is asked only on EVENTS (self.ask_reasons): the level's probes are done, a
+        surprise, a goal reached without finishing the level, steering stopped, a wrong prediction, a lost life,
+        or new screens found while exploring. In order: an event (not while steering; a surprise may interrupt
+        the probes); the probes; steering; the brain's own goal; otherwise the explorer decides."""
         m = self.memory
         if advisor() is None or self.scene is None or m.level is None or level_map.has_solution:
             return None
@@ -3099,8 +3129,8 @@ class Brain:
             self.probed_level, self.probes = (m.level, Prober.actions(scene, available, first))
             self.steerer.new_level()
         steering = self.steerer.goal is not None and (not self.steerer.stuck)
-        if self.ask_now and (not steering) and (not (self.probes and self.probes[0][1].startswith('probe: that looked like a switch'))):
-            asked = self._ask(scene, grid, available, now=True)
+        if self.ask_reasons and (not steering) and (not (self.probes and self.probes[0][1].startswith('probe: that looked like a switch'))):
+            asked = self._ask(scene, grid, available)
             if asked is not None:
                 return asked
         while self.probes:
@@ -3109,10 +3139,50 @@ class Brain:
                 m.why, m.route, m.expected_screen = (why, [], None)
                 self.stats['probes'] += 1
                 return action
+        if self.level_asked != m.level:
+            self.level_asked = m.level
+            self._want_llm(f'level {m.level + 1} starts: the probes are done')
+            asked = self._ask(scene, grid, available)
+            if asked is not None:
+                return asked
         steered = self._steer(scene, grid, available)
         if steered is not None:
             return steered
-        return self._ask(scene, grid, available)
+        own = self._own_goal(scene, grid, available)
+        if own is not None:
+            return own
+        found = self.stats['screens'] - self.screens_at_ask
+        if found >= LLM_IDLE_NEW_SCREENS:
+            self._want_llm(f'nothing to steer; exploring found {found} new screens since your last answer')
+            return self._ask(scene, grid, available)
+        return None
+
+    def _want_llm(self, reason: str) -> None:
+        """An event the LLM should hear about; it is asked at the next chance (not while steering)."""
+        if reason not in self.ask_reasons:
+            self.ask_reasons.append(reason)
+
+    def _own_goal(self, scene, grid: np.ndarray, available: list[int]) -> Action | None:
+        """Nothing is being steered and the LLM is not due: rather than wander, steer toward the best goal on the
+        list that the keys can move (the brain's own pick); None (the explorer decides) if none can be steered."""
+        steerer, board = (self.steerer, self.goal_board)
+        if steerer.goal is not None or steerer.stuck:
+            return None
+        controls = self._control_map()
+        for goal in board.possible_goals(scene):
+            if goal.key in steerer.failed or goal.relation == 'clear' or (not steerer.start(goal, scene, controls)):
+                continue
+            action = steerer.next_action(scene, grid.shape, available, controls)
+            if action is None:
+                steerer.reset()
+                continue
+            board.chosen = goal
+            self.stats['own_goals'] += 1
+            self.lab.history = (self.lab.history + [f'the agent tried a goal on its own: {goal.describe()}'])[-6:]
+            self.memory.why = f'own pick: {goal.describe()} | {steerer.note}'
+            self.memory.route, self.memory.expected_screen = ([], None)
+            return action
+        return None
 
     def _steer(self, scene, grid: np.ndarray, available: list[int]) -> Action | None:
         """Follow the steering plan toward the picked goal (no LLM calls while it works)."""
@@ -3136,6 +3206,7 @@ class Brain:
             self.lab.history.append(f"the agent moved #{steerer.mover} onto #{steerer.target} and the level did NOT end, so goal '{(steerer.goal.describe() if steerer.goal else '?')}' is wrong")
             steerer.give_up()
             self.goal_board.chosen = None
+            self._want_llm('the picked goal was reached and the level did NOT end')
         if action is None and steering and (steerer.goal is None) and (self.goal_board.chosen is not None):
             key = self.goal_board.chosen.key
             self.steer_stops[key] = self.steer_stops.get(key, 0) + 1
@@ -3143,12 +3214,24 @@ class Brain:
                 steerer.failed.add(key)
             self.goal_board.chosen = None
             self.lab.history.append(f'steering toward the picked goal stopped: {steerer.note}')
-            self.ask_now = True
+            self._want_llm('steering toward the picked goal stopped')
         if action is None:
             return None
         m.why, m.route, m.expected_screen = (steerer.note, [], None)
         self.stats['steer_actions'] += 1
         return action
+
+    @staticmethod
+    def _already_known(hypothesis, controls: ControlMap) -> bool:
+        """Its test predicts a key moves an object the way the current control mode already says it does."""
+        key = hypothesis.test_action[0]
+        if key not in (1, 2, 3, 4) or hypothesis.test_change != 'moved' or controls.current is None:
+            return False
+        step = controls.modes[controls.current].keys_for(hypothesis.test_object).get(key)
+        if step is None:
+            return False
+        dy, dx = step
+        return Lab._direction_ok(dx, dy, hypothesis.test_direction)
 
     def _one_of_several(self, scene) -> bool:
         """Arrived, the level goes on, and more objects like the target (its colour, a similar size, not a thin
@@ -3170,26 +3253,40 @@ class Brain:
         steerer.reset()
         following = [g for g in board.possible_goals(scene) if g.key not in steerer.failed and g.relation != 'clear']
         board.chosen = following[0] if following else None
+        mover, target = board.done[-1]
+        self._want_llm(f'#{mover} reached #{target} and the level goes on: more targets like it remain')
         return True
 
-    def _ask(self, scene, grid: np.ndarray, available: list[int], now: bool=False) -> Action | None:
-        """Every LLM_ASK_EVERY brain actions (or at once after a surprise): the object question, and the LLM's
-        one test action."""
+    def _ask(self, scene, grid: np.ndarray, available: list[int]) -> Action | None:
+        """An event happened (self.ask_reasons): the object question, and the LLM's one test action."""
         m = self.memory
         adviser = advisor()
-        if adviser is None or m.level is None or self.lab.pending is not None or (self.stats['actions'] < self.lab.next_ask_at and (not now)):
+        if adviser is None or m.level is None or self.lab.pending is not None or (not self.ask_reasons):
             return None
         controls = self._control_map()
-        briefing = Briefing(self.lessons.describe_wins(), self.lessons.news(scene, controls), controls.describe(scene), [f'#{a} is on #{b}' for a, b in self.goal_board.done], self.surprise)
-        self.surprise, self.ask_now = ('', False)
+        briefing = Briefing(self.lessons.describe_wins(), self.lessons.news(scene, controls), controls.describe(scene), [f'#{a} is on #{b}' for a, b in self.goal_board.done], self.surprise, list(self.ask_reasons))
+        reasons = '; '.join(self.ask_reasons)
+        self.surprise, self.ask_reasons, self.screens_at_ask = ('', [], self.stats['screens'])
         wholes = [o for o in scene.objects if scene.root(o.id) == o.id]
         relations = scene.remember_relations(RelationFinder.find(wholes, *grid.shape))
         self.goal_list = [g for g in self.goal_board.possible_goals(scene) if g.key not in self.steerer.failed]
         question = self.prompt.object_question(scene, relations, list(scene.observations)[-12:], self.lab.history, available, self.goal_list, Goals.purposes(scene, self.goal_board.roles), briefing)
         self.stats['llm_questions'] += 1
         hypothesis = adviser.hypothesise(question, available, tag=self.name)
-        self.lab.next_ask_at = self.stats['actions'] + LLM_ASK_EVERY
+        if hypothesis is not None:
+            self.goal_board.controlled = set(hypothesis.controlled)
+        if hypothesis is not None and hypothesis.test_action == CLICK_OBJECT:
+            target = next((o for o in scene.objects if o.id == hypothesis.test_object), None)
+            hypothesis = hypothesis._replace(test_action=click_on(target) if target is not None else None)
         if hypothesis is None or hypothesis.test_action is None:
+            return None
+        level_map = self.world.levels.get(m.level)
+        screen = level_map.screens.get(self._screen_id(grid)) if level_map is not None else None
+        if self._already_known(hypothesis, controls) or (screen is not None and hypothesis.test_action in screen.results) or (hypothesis.test_action[0] == 6 and hypothesis.test_object in controls.dead_clicks):
+            self.goal_board.vote(self.goal_list, hypothesis.goal_choice)
+            self.goal_board.roles.update(hypothesis.roles)
+            self.stats['llm_tests_known'] += 1
+            self.lab.history = (self.lab.history + [f'your test {PromptWriter.action_name(hypothesis.test_action)} was not run: its result is already known'])[-6:]
             return None
         if hypothesis.test_action[0] in (1, 2, 3, 4) and controls.current is not None and self.parked & set(controls.modes[controls.current].steps):
             self.goal_board.vote(self.goal_list, hypothesis.goal_choice)
@@ -3201,7 +3298,7 @@ class Brain:
         self.goal_board.roles.update(hypothesis.roles)
         chosen = self.goal_board.chosen.describe() if self.goal_board.chosen else hypothesis.goal
         m.theory = f'{hypothesis.rule} | goal: {chosen} | controlled: {hypothesis.controlled}'
-        m.why = f'LLM test: expects {hypothesis.prediction()}'
+        m.why = f'LLM test: expects {hypothesis.prediction()} (asked because: {reasons})'
         m.route, m.expected_screen = ([], None)
         self.stats['llm_actions'] += 1
         return hypothesis.test_action
@@ -3292,6 +3389,8 @@ class Brain:
         self.stats['deaths'] += 1
         if self.lab.pending is not None:
             self.lab.record('the test action LOST A LIFE')
+        if self.scene is not None:
+            self._want_llm('a life was lost; the level restarted')
         m.plan = []
         if m.last_action not in (None, RESET_ACTION):
             assert m.last_action is not None
@@ -3352,8 +3451,7 @@ class Brain:
         board.learn_from_win(scene)
         board.new_level()
         self.lab.history, self.lab.pending = ([], None)
-        self.lab.next_ask_at = 0
-        self.surprise, self.ask_now = ('', False)
+        self.surprise, self.ask_reasons = ('', [])
         self.steer_stops, self.parked = ({}, set())
         self.level_started_at = self.stats['actions']
 

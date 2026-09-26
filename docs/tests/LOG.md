@@ -4,6 +4,27 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-26 — Steps 4 and 5: fallback exploration, known-test filter, event-based asking (hypothesis mode)
+- Changes, in order (frozen builds in `experiments/2026-09-26_hyp_step{4,4b,5_events,5b}/`):
+  step 4 — a click test with no coordinates clicks a cell of `test.object` (before: every click test was dropped, so
+  7 click-only games had 0 LLM actions); when nothing is steered the brain steers toward its own best goal
+  (`Brain._own_goal`); "reach" goals from LLM roles (goal / collectible / switch); a test predicting a key effect
+  the control map already shows is not run. Step 4b — also not run: an action already taken on this screen, a click
+  on an object whose click did nothing this level (Reki's "dead-signature"). Step 5 — the LLM is asked only on
+  events (probes done, surprise, goal reached without a win, steering stopped, wrong prediction, life lost, 3+ new
+  screens while exploring); `LLM_ASK_EVERY` removed. Step 5b — "wrong prediction" dropped as an event.
+- Command: `ARC3_LLM_MODE=hypothesis eval/run.py --agent <frozen build> --swarm --max-actions 200 --seed S` (local
+  Qwen3.5-4B), plus two more runs each of step 2 and step 3 for the noise level.
+- Result (mean score over 25 games per run; levels): step 2 0.690 / 0.688 / 0.711 (11 / 10 / 12 levels); step 3
+  0.519 / 0.728 / 0.572 (9 / 10 / 8); step 4 0.383 (10); step 4b 0.538 (10); step 5 0.441 (8); brain alone 0.251
+  (6). Fallback exploration: 69% of actions (step 3), 72% (4b), 67% (5). Step 4's loss is the LLM choosing clicks:
+  tn36 clicked one inert object 10 times (level 1 ~80 actions vs 26–29). Step 5's: a wrong prediction asked again at
+  once, giving runs of 3–4 LLM clicks (tn36 0 levels). lp85 differences are the explorer picking the left or right
+  rotate button (luck), not these changes.
+- Verdict: NO GAIN — nothing after step 2 beats it on the 25-game score (run-to-run spread about ±0.1). The
+  mechanisms work where they apply (ar25 selection, click tests with object names, event reasons in the replay);
+  on the aggregate the LLM's own actions cost more than they find.
+
 ## 2026-09-26 — Step 3: control modes (selection), level lessons, surprises → LLM, several targets
 - Change: `agent/brain/control.py` `ControlMap` — control modes (which object each key moves), switches (a click /
   ACTION5 that changed something; the next key press shows the mode), how to select an object (click it if clicks

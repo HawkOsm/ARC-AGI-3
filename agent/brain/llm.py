@@ -101,7 +101,8 @@ OBJECT_SYSTEM_PROMPT = (
     '"roles": [{"id": 4, "role": "player"}, ...], '
     '"test": {"action": "ACTION4", "object": 4, "change": "moved", "direction": "left"}}\n'
     "test.change is what you expect to happen to test.object: moved (give the direction), appeared, disappeared, "
-    "recoloured, or nothing."
+    "recoloured, or nothing. To click an object, give test.action \"ACTION6\" (no coordinates) and its id as "
+    "test.object: the agent clicks a cell of that object."
 )
 
 ROLES = ["player", "goal", "mirror-copy", "mirror-line", "wall", "floor", "pushable", "collectible", "hazard",
@@ -147,11 +148,16 @@ class Hypothesis(NamedTuple):
             f" {self.test_direction}" if self.test_change == "moved" and self.test_direction != "none" else "")
 
 
+CLICK_OBJECT = Action(6, -1, -1)  # a test click with no coordinates: the brain clicks a cell of test.object
+
+
 def parse_hypothesis(text: str, available: list[int]) -> Hypothesis | None:
     try:
         data = json.loads(text[text.index("{"):text.rindex("}") + 1])
         test = data["test"]
         tests = parse_plan(json.dumps({"plan": [test["action"]]}), available)
+        if not tests and str(test["action"]).strip().upper() == "ACTION6" and 6 in available:
+            tests = [CLICK_OBJECT]
         return Hypothesis(str(data["rule"]), [int(i) for i in data["controlled"]], str(data["goal"]),
                           {int(r["id"]): str(r["role"]) for r in data["roles"]}, tests[0] if tests else None,
                           int(test["object"]), str(test["change"]), str(test["direction"]),
@@ -169,7 +175,6 @@ class Lab:
         self.history: list[str] = []
         self.last_verdict = ""
         self.verdicts = 0  # tests judged so far (the history itself is capped)
-        self.next_ask_at = 0
 
     def record(self, verdict: str) -> None:
         h = self.pending
@@ -373,6 +378,7 @@ class Briefing:
     controls: list[str] = field(default_factory=list)
     done: list[str] = field(default_factory=list)
     surprise: str = ""
+    asked_because: list[str] = field(default_factory=list)  # the events that made the brain ask now
 
 
 class PromptWriter:
@@ -427,6 +433,8 @@ class PromptWriter:
         parts = [f"Level {level + 1}. Lives lost so far: {self.stats['deaths']}. "
                  f"Actions in this game: " + ", ".join(f"ACTION{a}" for a in sorted(available) if a != 0) + "."]
         b = briefing or Briefing()
+        if b.asked_because:
+            parts.append("YOU ARE ASKED NOW BECAUSE: " + "; ".join(b.asked_because) + ".")
         if b.wins:
             parts.append("WHAT FINISHED EARLIER LEVELS (the strongest evidence; later levels usually keep the rule, "
                          "with more or new objects):\n" + "\n".join(f"  {w}" for w in b.wins))
@@ -499,10 +507,14 @@ class PromptWriter:
         return "\n".join(f"{y:02d} " + "".join(f"{v:x}" for v in row) for y, row in enumerate(grid.tolist()))
 
     @staticmethod
+    def action_name(action: Action) -> str:
+        return f"ACTION6 {action[1]} {action[2]}" if action[0] == 6 else f"ACTION{action[0]}"
+
+    @staticmethod
     def describe_step(action: Action, before: np.ndarray | None, after: np.ndarray | None,
                       outcome: str | None) -> str:
         """One line of history: what an action did."""
-        name = f"ACTION6 {action[1]} {action[2]}" if action[0] == 6 else f"ACTION{action[0]}"
+        name = PromptWriter.action_name(action)
         if outcome is not None:
             return f"{name} -> {outcome}"
         if before is None or after is None:

@@ -257,11 +257,12 @@ class GoalBoard:
         self.roles: dict[int, str] = {}  # object id -> purpose the LLM gave it (this level; shown in questions)
         self.won_pairs: dict[tuple[int, int], int] = {}  # (mover colour, target colour) -> levels won (lessons)
         self.done: list[tuple[int, int]] = []  # (mover, target) pairs reached this level; the level goes on
+        self.controlled: set[int] = set()  # objects the LLM says the player moves (this level)
         self._cache_key: frozenset = frozenset()
         self._cache: list[Correspondence] = []
 
     def new_level(self) -> None:
-        self.chosen, self.roles, self.done = None, {}, []
+        self.chosen, self.roles, self.done, self.controlled = None, {}, [], set()
         self._cache_key = frozenset()
 
     def possible_goals(self, scene: LevelScene) -> list[GoalCandidate]:
@@ -296,6 +297,7 @@ class GoalBoard:
             if pair_wins or target_wins:
                 why += ", and earlier levels were won with these colours"
             candidates.append(GoalCandidate(c.relation, c.a, c.b, score, why))
+        candidates += self._reach_goals(scene, reacting, held)
         copies: dict[tuple, list[SceneObject]] = {}
         for o in scene.objects:
             if not o.background and scene.root(o.id) == o.id and o.size > 1:
@@ -308,6 +310,21 @@ class GoalBoard:
                                                 f"{len(group)} identical copies", (group[0].colour, group[0].shape)))
         candidates.sort(key=lambda g: -g.score)
         return candidates[:MAX_GOAL_CANDIDATES]
+
+    def _reach_goals(self, scene: LevelScene, reacting: set[int], held: set[int]) -> list[GoalCandidate]:
+        """The player reaching what the LLM called a goal / collectible / switch (avatar games: no shape pair)."""
+        visible = {o.id for o in scene.objects if scene.root(o.id) == o.id}
+        movers = [i for i in self.controlled if i in visible and i in reacting and i not in held]
+        found = []
+        for target, role in self.roles.items():
+            if role not in REACH_ROLES or target not in visible or target in held:
+                continue
+            for mover in movers:
+                if mover != target:
+                    key = ("reach", mover, target)
+                    score = 0.6 * (1 + 0.5 * self.llm_votes.get(key, 0))
+                    found.append(GoalCandidate("reach", mover, target, score, f"the LLM called #{target} a {role}"))
+        return found
 
     def vote(self, candidates: list[GoalCandidate], choice: int) -> None:
         """The LLM picked candidate `choice` (1-based; 0 = none of them): it moves up the list."""
@@ -326,3 +343,4 @@ class GoalBoard:
 
 
 MAX_GOAL_CANDIDATES = 8
+REACH_ROLES = ("goal", "collectible", "switch")

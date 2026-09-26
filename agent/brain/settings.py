@@ -119,7 +119,7 @@ LLM_PLAN_MAX = 8  # actions taken from one answer before asking again
 # "hypothesis": the brain asks about OBJECTS (what is controlled, what is the goal, roles) and runs the LLM's one
 # test action per question to check its prediction; every other action is the brain's. ARC3_LLM_MODE overrides.
 LLM_MODE = "drive"
-LLM_ASK_EVERY = 4  # hypothesis mode: brain actions between questions (evidence for the next one)
+LLM_IDLE_NEW_SCREENS = 3  # hypothesis mode, nothing to steer: new screens explored before the LLM hears of them
 LLM_HISTORY = 6  # hypothesis mode: earlier explanations + test verdicts shown to the model
 LLM_RECENT_STEPS = 16  # recent steps (action -> what happened) shown to the model
 # At most this many requests are in flight; other games wait on our side, so the timeout measures the
