@@ -1,12 +1,13 @@
 {
- "score": 1.2847214649720546,
- "levels": 1.1666666666666667,
+ "score": 1.1811507308802198,
+ "levels": 1.0,
  "per_game": {
-  "ls20": 0.014697236919459141,
-  "vc33": 2.55474569302465
+  "ls20": 0.0,
+  "vc33": 2.3623014617604396
  },
  "crashes": 0,
- "swarm_levels": 3,
+ "swallowed_errors": 0,
+ "swarm_levels": 2,
  "first_error": null,
  "config": {
   "games": [

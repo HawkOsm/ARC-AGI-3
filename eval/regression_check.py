@@ -42,6 +42,9 @@ def measure() -> dict:
         levels=statistics.fmean(r["levels"] for r in rows),
         per_game={g: statistics.fmean(r["score"] for r in rows if r["game"] == g) for g in GAMES},
         crashes=sum(1 for r in rows + swarm if r["error"]),
+        # choose_action exceptions caught by the agent's safety net: play continues
+        # randomly, so a broken brain would otherwise pass silently (happened once).
+        swallowed_errors=sum(r.get("agent_stats", {}).get("errors", 0) for r in rows),
         swarm_levels=sum(r["levels"] for r in swarm),
         first_error=next((r["error"] for r in rows + swarm if r["error"]), None),
         config=dict(games=GAMES, reps=REPS, budget=BUDGET, seed=SEED),
@@ -56,6 +59,9 @@ def main() -> int:
     print(json.dumps({k: v for k, v in m.items() if k != "first_error"}, indent=1))
     if m["crashes"]:
         print(f"FAIL: {m['crashes']} crashed run(s):\n{m['first_error']}")
+        return 1
+    if m["swallowed_errors"]:
+        print(f"FAIL: the agent's safety net caught {m['swallowed_errors']} exception(s) in choose_action")
         return 1
     if args.update:
         BASELINE.parent.mkdir(parents=True, exist_ok=True)

@@ -198,6 +198,15 @@ def aggregate_by_rep(rows: list[dict], label: str, games: list[str]) -> dict[int
     return {rep: statistics.fmean(d.get(g, 0.0) for g in games) for rep, d in by.items()}
 
 
+def levels_by_rep(rows: list[dict], label: str) -> dict[int, int]:
+    """Total levels completed over all games, per rep (less noisy than score)."""
+    by: dict[int, int] = {}
+    for r in rows:
+        if r["label"] == label:
+            by[r["rep"]] = by.get(r["rep"], 0) + r["levels"]
+    return by
+
+
 def summarize(rows: list[dict], labels: list[str], games: list[str]) -> str:
     lines = []
     for lab in labels:
@@ -207,6 +216,8 @@ def summarize(rows: list[dict], labels: list[str], games: list[str]) -> str:
         errs = sum(1 for r in rs if r["error"])
         lines.append(f"### {lab}  ({len(rs)} runs, {errs} crashed)")
         lines.append(f"Aggregate score (mean over games, per rep): **{m:.3f} ± {h:.3f}** (95% CI, n={len(agg)} reps)")
+        lm, lh = mean_ci([float(v) for v in levels_by_rep(rows, lab).values()])
+        lines.append(f"Total levels (sum over games, per rep): **{lm:.2f} ± {lh:.2f}**")
         lines.append("")
         lines.append("| game | score mean ± ci | levels mean | max levels | actions mean "
                      "| acts/level (completed) | crashes |")
@@ -231,6 +242,11 @@ def summarize(rows: list[dict], labels: list[str], games: list[str]) -> str:
         lines.append(f"### Paired: {a} − {b}")
         lines.append(f"Aggregate diff per rep: **{m:+.3f} ± {h:.3f}** (95% CI, n={len(diffs)})  "
                      f"→ {'SIGNIFICANT' if abs(m) > h else 'WITHIN NOISE'}")
+        LA, LB = levels_by_rep(rows, a), levels_by_rep(rows, b)
+        ld = [float(LA[k] - LB[k]) for k in sorted(set(LA) & set(LB))]
+        lm, lh = mean_ci(ld)
+        lines.append(f"Total-levels diff per rep: **{lm:+.2f} ± {lh:.2f}**  "
+                     f"→ {'SIGNIFICANT' if abs(lm) > lh else 'WITHIN NOISE'}")
         lines.append("")
         lines.append("| game | Δscore mean ± ci | Δlevels mean | wins/losses/ties (by score) |")
         lines.append("|---|---|---|---|")
@@ -248,10 +264,39 @@ def summarize(rows: list[dict], labels: list[str], games: list[str]) -> str:
     return "\n".join(lines)
 
 
+def summarize_variants(rows: list[dict], labels: list[str], games: list[str]) -> str:
+    """Ablation table: every label paired against the first one (the reference)."""
+    ref = labels[0]
+    ref_score, ref_levels = aggregate_by_rep(rows, ref, games), levels_by_rep(rows, ref)
+    lines = [f"Reference: **{ref}** — score {statistics.fmean(ref_score.values()):.3f}, "
+             f"levels {statistics.fmean(ref_levels.values()):.2f} per rep", "",
+             "| variant | Δscore vs ref (95% CI) | Δlevels vs ref (95% CI) | verdict | games whose levels moved ≥0.1 |",
+             "|---|---|---|---|---|"]
+    for lab in labels[1:]:
+        sc, lv = aggregate_by_rep(rows, lab, games), levels_by_rep(rows, lab)
+        keys = sorted(set(sc) & set(ref_score))
+        ds, dh = mean_ci([sc[k] - ref_score[k] for k in keys])
+        ls_, lh = mean_ci([float(lv[k] - ref_levels[k]) for k in keys])
+        verdict = "WORSE without it" if (ds + dh < 0 or ls_ + lh < 0) else \
+            "BETTER without it" if (ds - dh > 0 or ls_ - lh > 0) else "no measurable effect"
+        moved = []
+        for g in games:
+            a = {r["rep"]: r["levels"] for r in rows if r["label"] == lab and r["game"] == g}
+            b = {r["rep"]: r["levels"] for r in rows if r["label"] == ref and r["game"] == g}
+            d = statistics.fmean(a[k] - b[k] for k in keys)
+            if abs(d) >= 0.1:
+                moved.append(f"{g} {d:+.2f}")
+        moved_text = ", ".join(moved) or "-"
+        lines.append(f"| {lab} | {ds:+.3f} ± {dh:.3f} | {ls_:+.2f} ± {lh:.2f} | {verdict} | {moved_text} |")
+    return "\n".join(lines)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--agent", default="agent/my_agent.py", help="path to a file defining MyAgent")
     ap.add_argument("--champion", default=None, help="paired mode: path to the champion's MyAgent file")
+    ap.add_argument("--variant", action="append", default=[], metavar="LABEL=PATH",
+                    help="ablation mode: extra agents, each paired against --agent (repeatable)")
     ap.add_argument("--games", default="all", help="'all', 'smoke', or comma-separated short ids")
     ap.add_argument("--reps", type=int, default=30)
     ap.add_argument("--max-actions", type=int, default=1000, help="per-game action cap (framework MAX_ACTIONS)")
@@ -274,6 +319,7 @@ def main() -> int:
         labels = ["candidate"]
     else:
         entrants = [("candidate", args.agent)] + ([("champion", args.champion)] if args.champion else [])
+        entrants += [tuple(v.split("=", 1)) for v in args.variant]
         labels = [lab for lab, _ in entrants]
         tasks = [(path, g, rep, run_seed(g, rep, args.seed), args.max_actions, lab)
                  for rep in range(args.reps) for g in games for lab, path in entrants]
@@ -292,7 +338,7 @@ def main() -> int:
     meta = dict(cmd=" ".join(sys.argv), games=games, reps=args.reps, max_actions=args.max_actions,
                 seed=args.seed, swarm=args.swarm, agent=args.agent, champion=args.champion)
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=1))
-    summary = summarize(rows, labels, games)
+    summary = summarize(rows, labels, games) if len(labels) <= 2 else summarize_variants(rows, labels, games)
     (out_dir / "summary.md").write_text(f"# Eval {out_dir.name}\n\n`{meta['cmd']}`\n\n{summary}\n")
     print(summary)
     print(f"\nWrote {out_dir.relative_to(ROOT)}/")

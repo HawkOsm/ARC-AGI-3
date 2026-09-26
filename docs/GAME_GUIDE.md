@@ -15,7 +15,7 @@ Sources: `.claude/scratch/probe/game_meta.py` (levels, baselines, actions),
   no-ops): bottom row y=63 (cd82, dc22, g50t, ka59, s5i5, su15, tu93, bp35), top row y=0 (lf52,
   sp80, vc33, sc25), y=1 (tn36), column x=63 (ar25), x=0 (r11l), y=53 right edge (sb26, sk48), two
   rows y=61–62 (ls20), opposite corners (m0r0). It is monotone within a level, so per-cell
-  change-frequency masking cannot catch it → `VolatileMask` border-tick rule.
+  change-frequency masking cannot catch it → counter-track rule (`learn.update_counters`).
 - The counter is an **action budget per life**: when it runs out → `GAME_OVER` (ft09 dies every
   ~180 actions under exploration). A RESET restores it but restarts the level.
 - **Animations**: some actions return many frame layers (sp80 A5: 22, sb26 A5: 42, bp35 A4: 25,

@@ -10,14 +10,14 @@ An agent for Kaggle's **ARC Prize 2026 — ARC-AGI-3** (deadline 2026-11-02): pl
 turn-based grid games (64×64, 16 colours) with no instructions, scored per level by action
 efficiency against human baselines. Built on the official starter kit (CREDITS.md).
 
-**Live champion: the "floor" agent** in `agent/core/` (flattened into `agent/my_agent.py`, frozen
-copy in `eval/champion/my_agent.py`). See "Architecture" below and LOG.md for its numbers.
+**Live champion: the pruned brain** (`agent/brain/`, promoted 2026-09-26, frozen in
+`eval/champion/my_agent.py`; local only — the Kaggle LB entry is still floor v1, LB 0.44).
 
 ## Quick commands
 
 ```bash
 make setup                 # uv venv + pinned arc-agi 0.9.8 + framework @135f20a (== Kaggle)
-make build                 # agent/core/ -> agent/my_agent.py (never hand-edit the latter)
+make build                 # agent/brain/ -> agent/my_agent.py (never hand-edit the latter)
 make check                 # ruff + "my_agent.py is freshly built"
 make interface             # re-verify interface facts (run after any version bump)
 make eval REPS=30 BUDGET=2000          # N-repeat eval of agent/my_agent.py on all 25 games
@@ -25,12 +25,16 @@ make eval-paired REPS=30 BUDGET=2000   # candidate vs eval/champion/my_agent.py 
 make eval-swarm            # all games as threads in one process (Kaggle's execution model)
 .venv/bin/python eval/kaggle_sim.py --games all --max-actions 500   # run the real notebook vs a competition-mode gateway
 make ci                    # what GitHub Actions runs
+.venv/bin/python eval/explain.py ls20 800   # play a game, then print the World (beliefs) in words
 make notebook [AGENT=...]  # build notebooks/submission.ipynb (no push)
 ```
 
 Kaggle actions are **manual** unless autonomous mode is explicitly on (rule 7): `make submit`
 pushes the kernel (Phase A); the leaderboard submission is the "Submit to Competition" click on
-the kernel page (Phase B) — 5/day.
+the kernel page (Phase B) — **1 per day** (competition rules §2; the starter README's "5" is wrong
+for this competition). ~38 submissions remain from 2026-09-25 to the deadline: spend them only on
+paired-verified champions or deliberate calibration probes. Each scored rerun takes ~TIME_BUDGET_S
+(7.5 h) of Kaggle time.
 
 ## Standing rules
 
@@ -58,6 +62,10 @@ the kernel page (Phase B) — 5/day.
 11. **Local == Kaggle is maintained on purpose**: versions are pinned to the competition
     dataset's wheels and framework commit. If Kaggle's dataset changes, re-pin and re-run
     `make interface` before trusting any local number.
+12. **No model training** (owner decision, 2026-09-26): training loops slow development down.
+    The agent learns *while it plays* (the World beliefs) — that is fine; offline training or
+    fine-tuning of networks is not. Pre-trained models used as-is (inference only) are still
+    allowed by the competition, but only via ROADMAP Phase 3 and a head-to-head win.
 
 ## Verified interface facts
 
@@ -114,39 +122,75 @@ not assumed. Re-verify after any version change.
 - Prize eligibility requires open-sourcing; milestone prizes require a public notebook by the
   milestone date (Milestone 2: 2026-09-30).
 
-## Architecture (agent/core/)
+## Architecture (agent/brain/)
+
+The idea: **fixed, game-agnostic functions + a `World` of beliefs that starts almost empty
+and fills up as the agent plays.** Code never changes per game; only the beliefs do.
 
 ```
-config.py      every knob, commented
-perception.py  settled_grid, components() (row runs + union-find, ~2 ms), VolatileMask, AvatarTracker
-memory.py      LevelGraph (masked-state graph, re-keyable), ActionModel (learned priors)
-explorer.py    Explorer: the policy (framework-independent)
-framework.py   MyAgent(Agent): thread-safe action data, error hardening, frame cap, time guard
+agent/brain/
+  settings.py      every tunable number, with why it matters
+  world.py         WORLD  - the beliefs (what the agent knows about this game)
+  look.py          LOOK   - reading the screen: settled picture, objects, changed blobs, and
+                            first_look (a level's inventory: item kinds with purpose "?", patterns)
+  goals.py         GOALS  - decided by the game: features that changed when levels were won
+  learn.py         LEARN  - functions that write beliefs into the world from what was seen
+  decide.py        DECIDE - functions that read the beliefs and pick the next action
+  llm.py           ASK    - optional LLM advisor (local vLLM server); brain falls back when it fails
+  brain.py         BRAIN  - the loop: look -> events -> learn -> decide  (read this first)
+  kaggle_agent.py  MyAgent: plugs the Brain into Kaggle's framework, with all the hardening
+agent/my_agent.py  generated single file that ships (make build) - never edit by hand
 ```
 
-Per step: settled grid → mask update (re-key all graphs if the mask grew) → masked key → record
-`(prev_key, prev_action) → key | DEATH | LEVELUP` → drop the plan if the key is not what the plan
-expected (open-loop plans are never trusted) → choose:
-1. level already solved → BFS shortest path to its LEVELUP edge;
-2. else the best untried action here if its learned p ≥ `LOCAL_GREEDY_P`;
-3. else BFS over known edges for the frontier minimising `distance + λ(1 − p)`;
-4. else refine the current state's click lattice (stride 4 → 2 → 1) and retry; else random legal.
+The beliefs (`world.py`):
 
-Learned model (`ActionModel`): per-action and per-click-colour success rates (Laplace with
-priors), undo detection (action returns to the pre-previous state ≥80%), pair-undo (b after a
-reverts ≥90% → demote b after a), avatar-position no-op/death tables (walls/pits generalise
-across states that differ elsewhere). Avatar = colour whose changed-cell centroid shift is
-consistent per action and differs across actions (environmental movers shift identically
-regardless of action).
+| belief | holds | written by | kept across levels |
+|---|---|---|---|
+| `world.counters` | which pixels are HUD step-counters (ignored when comparing screens) | `learn.update_counters` | yes |
+| `world.avatar` | which colour is the player (moves differently per key), its extra "part" colours, how far each key moves it | `learn.update_avatar`, `learn.learn_what_touching_does` | yes |
+| `world.kinds` | every distinct item type (colour + exact shape) seen at a first look, purpose "?" until learned | `look.first_look` | yes |
+| `world.colour_roles` | what touching each colour did: floor / wall / hazard / goal / pushable / collectible (a belief; using it to predict wall bumps measured harmful and was removed) | `learn.learn_what_touching_does` | yes |
+| `world.patterns` | first-look observations: repeated kinds, one shape in several colours | `look.first_look` | yes |
+| `world.actions` | per action: changes the screen? undo? reverses another? no-op / deadly at a position? | `learn.record_action_result` | yes |
+| `world.rules` | steps per life | `learn.is_timeout_death` | yes |
+| `world.levels[n]` | the first-look inventory (`items`) and the map: every screen seen and what each action did on it | `look.first_look`, `Brain._record_move` | per level |
+| `world.goals` | what finishes a level, as the game showed it: feature changes (colour counts, colour-colour touches, what the avatar touches) between a level's first screen and its winning screen; confirmed or contradicted by every later win | `goals.learn_goals_from_win`, `goals.goals_from_first_look` (weak cues) | yes |
+| `world.deaths` | real deaths, re-judged as timeouts when a budget appears | `Brain._on_death` | — |
 
-Deviations from the architecture brief, and why:
-- Volatile masking is **border-tick based**, not frequency based: the HUD counter present in
-  every public game is monotone, so per-cell frequency never flags it (frequency masking is kept
-  as a secondary rule for blinkers).
-- Transition "model" is an exact per-level graph plus generalising priors, not a learned
-  next-state predictor: games are deterministic given the full state, so exact edges are
-  cheaper and never wrong where recorded; generalisation lives in the priors.
-- No LLM: programmatic floor first (ROADMAP Phase 3).
+One step (`Brain.next_action`):
+1. **LOOK** — the settled picture (last animation layer).
+2. **EVENTS** — game over → blame the last action (unless it was a timeout) and RESET; level
+   up → record LEVEL_UP, start a new level map. The level change is the only real reward.
+3. **LEARN** — first screen of a level → `first_look` inventory. Then grow the counter mask (re-identify all screens if it grew), update the avatar,
+   identify this screen, record `last screen + last action → this screen`, update action
+   beliefs, learn what touching each colour did (one wall bump teaches every cell of that colour). A planned route whose next screen isn't what we got is dropped (never trust a plan
+   the world disagrees with).
+4. **DECIDE** (`decide.py`) — level solved → shortest known route to LEVEL_UP; else the best
+   untried action here if promising enough; else the
+   (screen, untried action) with the fewest expected actions per new screen, `(distance+1)/chance`,
+   within this life's step budget; else RESET (only if steps were taken); else click the screen
+   on a finer grid; else random.
+
+Every piece in `agent/brain/` survived the 2026-09-25 ablation (docs/tests/IDEAS_TRIED.md): additions
+that measured nothing were deleted rather than kept "just in case".
+
+Deviations from the original architecture brief, and why:
+- Counter masking is **tick-track based**, not frequency based: the HUD counter present in every
+  public game is monotone, so per-cell frequency never flags it (frequency masking is kept for
+  blinkers).
+- The transition "model" is an exact per-level screen map plus generalising action beliefs, not a
+  learned next-state predictor: games are deterministic given the full state, so exact results are
+  never wrong where recorded; generalisation lives in `world.actions`.
+- LLM advisor (`llm.py`, ROADMAP Phase 3): optional, on only when `ARC3_LLM_URL` is set; with it off
+  the agent is run-for-run identical to the brain. See docs/ARCHITECTURE.md.
+
+Goals are never written in the code (owner's rule): the only goal vocabulary is generic screen
+features, and the game's own level completions decide which features matter and in which
+direction. Before the first win the only goals are first-look cues (one shape in two colours ->
+"make them touch"), which later wins confirm or kill.
+
+Next: a view-scroll detector so the map is kept in world coordinates if a game's camera moves (none
+of the 25 public games scroll in 300 random moves each; the engine supports cameras).
 
 ## Load-bearing constraints
 
@@ -155,13 +199,18 @@ Deviations from the architecture brief, and why:
   GPU, competition Code Requirements); the margin covers notebook setup, the gateway wait and
   scorecard close. The official sample uses 8 h − 5 min. All games share one process/GIL, so per-action compute sets the
   achievable action count per game.
-- Thread-safe action data (`_pending` → `arc_env.step`) — the shared enum race is real.
-- Never RESET with 0 actions in the level (full reset). The explorer only RESETs on GAME_OVER,
-  NOT_PLAYED, or (replay variant only) deliberately.
-- Graph re-key on mask change (nodes keep a zlib-packed raw grid, ~200 B each) — dropping the
-  graph instead would throw away all exploration each time the HUD mask grows.
-- Click lattice + refinement — component-centroid clicks alone stall on games whose clickable
-  unit is a sub-part of a component (ft09, lp85).
+- Thread-safe clicks (`MyAgent._click` → `arc_env.step`) — the shared enum race is real.
+- Never RESET with 0 actions in the level (that restarts the whole game). The Brain only RESETs
+  on GAME_OVER / NOT_PLAYED / WIN, or voluntarily when `life_length > 0`.
+- Screen re-identification when the counter mask grows (`LevelMemory.rename_screens`; each
+  screen keeps a compressed snapshot, ~200 B) — dropping the map instead would throw away all
+  exploration each time the mask grows.
+- Click grids inside big objects + whole-screen click grids on exhausted screens — object-centre
+  clicks alone stall on games whose clickable unit is part of an object (ft09, lp85).
+- Timeout deaths are not blamed on the last action (`learn.is_timeout_death`) — otherwise legal
+  moves get blacklisted as deadly (sp80: 44/44 "deaths" were timeouts).
+- Memory: compact `(prior, colour)` candidate info, capped 1-pixel scans, `MEM_GUARD_*` — all games
+  share one Kaggle process and an out-of-memory kill zeroes the whole submission.
 
 ## Tried and ruled out
 

@@ -1,8 +1,8 @@
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-# agent/my_agent.py is generated (scripts/build_submission.py) — lint agent/core/ instead.
-extend-exclude = ["agent/my_agent.py", "vendor", "reference", "environment_files", ".claude", "experiments/*/my_agent.py", "eval/champion/my_agent.py"]
+# Generated single-file agents (agent/my_agent.py, experiments/, eval/champion/) are not linted — agent/brain/ is.
+extend-exclude = ["agent/my_agent.py", "vendor", "reference", "environment_files", ".claude", "experiments", "eval/champion/my_agent.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "C901", "B"]

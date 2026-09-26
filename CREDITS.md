@@ -14,7 +14,7 @@ pinned framework commit + `arc-agi`/`arcengine`/`numpy` versions matching Kaggle
 as [`docs/STARTER_README.md`](docs/STARTER_README.md).
 
 **ARC-AGI-3-Agents framework** — [arcprize/ARC-AGI-3-Agents](https://github.com/arcprize/ARC-AGI-3-Agents),
-vendored by `make setup` into `vendor/` (gitignored), pinned to `135f20a`. `agent/core/framework.py`
+vendored by `make setup` into `vendor/` (gitignored), pinned to `135f20a`. `agent/brain/kaggle_agent.py`
 subclasses its `Agent` and overrides `do_action_request`/`take_action`/`append_frame` to harden it
 (see AGENT.md "Verified interface facts").
 
@@ -39,5 +39,23 @@ studied later, update this entry with what was taken.
 **Architecture brief** (from the project owner, describing a team that iterated 79+ versions on
 this competition): volatile-cell-masked state hashing, a learned transition model with verified
 BFS planning, object-centric avatar identification, no-op/undo interface learning,
-programmatic-first with LLM-as-rescue. `agent/core/` implements the first four; see AGENT.md for
+programmatic-first with LLM-as-rescue. `agent/brain/` implements the first four; see AGENT.md for
 where the implementation deviates and why.
+
+**"The Duck" — Tufa Labs, 1st place ARC-AGI-3 Milestone #1** ([arcprize.org blog](https://arcprize.org/blog/arc-prize-2026-milestone-1);
+harness repo cloned to `.claude/scratch/llm/duck-harness`, **no license**, so nothing is copied). Read
+2026-09-26 for serving setup only: running one vLLM OpenAI-compatible server inside the Kaggle notebook
+from an offline wheelhouse installed with `--target`, attached model snapshot, prefix caching,
+`--reasoning-parser qwen3`, Qwen's thinking-mode sampling (temperature 0.6, top-p 0.95). Our
+`notebooks/llm_prep/`, `notebooks/llm_dev/` and `agent/brain/llm.py` were written from scratch; the
+agent design (brain in charge, LLM proposes short plans) is ours, not theirs (theirs: the LLM writes
+and runs Python in a REPL).
+
+**vLLM recipe for Qwen3.8-27B** ([recipes.vllm.ai](https://recipes.vllm.ai/Qwen/Qwen3.8-27B), read
+2026-09-26): vLLM ≥ 0.17 supports the model; the RTX PRO 6000 / Blackwell notes informed the serve flags.
+
+**Model** — [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) @ `017b9c7af6` (Apache-2.0),
+used as-is (no training). On Kaggle it is attached from the public mirror
+[michaelpoluektov/qwen3-8-27b-fp8](https://www.kaggle.com/models/michaelpoluektov/qwen3-8-27b-fp8),
+accepted only after `notebooks/llm_prep/` checks every file against the Hugging Face sha256 manifest
+(`notebooks/llm_prep/hf_manifest.json`).

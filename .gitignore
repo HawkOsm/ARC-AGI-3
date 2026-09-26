@@ -25,3 +25,6 @@ reference/
 .claude/scratch/
 .ruff_cache/
 eval/results/
+
+# Downloaded model weights (large; see models/README if present)
+models/

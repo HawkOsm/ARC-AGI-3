@@ -4,6 +4,204 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-26 — GPU dev run v3: server up, but every thinking answer ran out of tokens
+- Change: v2's sampler/CUDA_HOME fix. nvcc seen: system **12.8** (too old for sm_120), server 13.4 (wheelhouse).
+- Result: server up after 300 s. Games 477 s, aggregate **0.6816 / 17 levels** — the same as the local
+  advisor-off swarm baseline (0.682 / 17, seed 0, 1000 actions), because the LLM contributed **0 actions**:
+  44 requests, 38 answered and all 38 `finish=length` at 6,144 reasoning tokens with an empty answer
+  (prompt ~4.7k tokens), 6 timed out at 240 s → the advisor paused itself and the brain played the rest.
+  Throughput with 25 concurrent requests: ~26 tokens/s per request, ~650 tokens/s total.
+- Consequence (arithmetic, not measured play): thinking mode at >6k tokens/answer gives ~9 h × 650 tok/s
+  ≈ 21M tokens ≈ a dozen answers per game over ~110 hidden games.
+- Fix: thinking off by default (`enable_thinking: false`, max 1,024 tokens, 180 s), Qwen3.8's recommended
+  sampling per mode (my 0.6/0.95 matched neither), everything overridable per run (`ARC3_LLM_THINKING`,
+  `ARC3_LLM_MAX_TOKENS`, `ARC3_LLM_TIMEOUT_S`). dev.py now plays several arms in one session, each with a
+  fresh copy of the agent module. Request bodies checked in-process; advisor-off regression PASS (1.1812).
+- Verdict: INFO — v4 pushed: arm `nothink` (5,400 s) then arm `think` (16k tokens, 2,700 s).
+
+## 2026-09-26 — GPU dev run v2: past the forward pass, died in the sampler's JIT compile
+- Change: the `.pth` fix from v1.
+- Result: pre-flight import check rc=0 (`cutlass` found via `/tmp/vllm-site/nvidia_cutlass_dsl/dsl_packages`).
+  Weights loaded, the profiling forward pass ran (the GDN linear-attention kernels work), flashinfer autotuning ran;
+  then the first sampling step JIT-compiled flashinfer's top-k/top-p kernel and failed:
+  `FlashInfer requires GPUs with sm75 or higher`, preceded by `SM 12.x requires CUDA >= 12.9` — flashinfer
+  judged the GPU arch through the Kaggle image's older system CUDA toolkit. ~6 GPU-minutes.
+- Fix (checked in the vLLM 0.30.0 wheel source before pushing): `VLLM_USE_FLASHINFER_SAMPLER=0` makes
+  `flashinfer_sampler_supported()` return False, so the model-runner-v2 sampler uses `apply_top_k_top_p` +
+  `gumbel_sample` (no JIT). Also `CUDA_HOME`/`PATH` point at the wheelhouse's CUDA 13 nvcc (nvidia-cuda-nvcc
+  13.4.92) for any other JIT; the report records both nvcc versions.
+- Verdict: 🐛 fixed; v3 pushed. GPU quota used so far 0.22 h of 30 h.
+
+## 2026-09-26 — GPU dev run v1 (hawkosm/arc3-llm-dev, RTX PRO 6000): server failed to start
+- Change: none to the agent. First run of `notebooks/llm_dev/dev.py`.
+- Command: `notebooks/llm_dev/build.py --budget-s 9000 --max-actions 1000` + `kaggle kernels push -t 14400`
+- Result: GPU = RTX PRO 6000 Blackwell, 97,887 MiB, **driver 580.159.04, CUDA 13.0** (the cu130 wheelhouse is
+  compatible). arc-agi + wheelhouse installs rc=0 (95 s). Weights loaded, then the engine died in its first
+  forward pass: `flashinfer.gdn_prefill` → `import cutlass` → ModuleNotFoundError. Cause (verified on the
+  real wheels): `nvidia-cutlass-dsl` *was* installed but exposes `cutlass` only via a `.pth` file, and `.pth`
+  files are ignored in a `--target` dir used through PYTHONPATH. ~7 GPU-minutes used.
+  Also seen: the competition dataset itself ships the 25 public games (`environment_files/`).
+- Fix: dev.py now runs `site.addsitedir()` once to collect the `.pth` paths into the server's PYTHONPATH,
+  and does a pre-flight `import flashinfer.gdn_prefill, cutlass` that aborts before loading the model.
+- Verdict: 🐛 fixed; v2 pushed.
+
+## 2026-09-26 — Kaggle LLM prep notebook (hawkosm/arc3-llm-prep v1, CPU, internet on)
+- Change: none to the agent. `notebooks/llm_prep/prep.py` with the HF manifest embedded; attaches the
+  public Kaggle model mirror `michaelpoluektov/qwen3-8-27b-fp8/transformers/default/1`.
+- Command: `kaggle kernels push -p .claude/scratch/llm/kaggle/prep_push` → output `prep_report.json`
+- Result: mirror **81/81 files match** Hugging Face `Qwen/Qwen3.8-27B-FP8@017b9c7af6` (sha256 for LFS,
+  git-blob sha1 otherwise), 0 missing, 0 extra, 112 s. Wheelhouse: 198 wheels, 3.89 GB, `pip install
+  --no-index --target` rc=0; import check `vllm 0.30.0, torch 2.13.0+cu130, CUDA 13.0, transformers 5.17.0`,
+  arch list includes `sm_120`. Kaggle image: Python 3.12.13, glibc 2.35. Pip warned about conflicts
+  with image packages (protobuf, gradio, ...) — irrelevant for a separate `--target` dir used only by
+  the server process.
+- Verdict: INFO — model and wheelhouse usable offline. Unknown until the GPU run: whether the RTX
+  driver supports CUDA 13.0.
+
+## 2026-09-26 — LLM advisor (agent/brain/llm.py): plumbing only, no real model yet
+- Change: optional advisor, on only when `ARC3_LLM_URL` is set. Prompt = beliefs + last 16 steps +
+  the 64x64 screen as hex rows; answer = `{"plan": [...]}` (≤8 legal actions, never RESET). Plan dropped on
+  death / level up / an advised action that changed nothing; 3 failed requests in a row pause it 5 min.
+  Optional per-request log (`ARC3_LLM_LOG`). Mock server `eval/mock_llm.py`; Kaggle notebooks
+  `notebooks/llm_prep/` (CPU: mirror hash check + vLLM 0.30.0 wheelhouse) and `notebooks/llm_dev/` (GPU dev run).
+- Commands:
+  - advisor OFF identity: `eval/run.py --agent agent/my_agent.py --champion eval/champion/my_agent.py --reps 2 --max-actions 1000`
+  - mock ON, 10% failures + 10% garbage: `eval/run.py --games ls20,vc33,ft09,tu93,sp80 --reps 2 --max-actions 300`
+    and `--swarm --max-actions 300`
+  - GPU notebook dry run locally against the mock: `DEV_INPUT=... DEV_LLM_URL=... dev.py` (25 threads, 150 actions)
+- Result: OFF = **50/50 runs identical** to the champion, wall 560 s vs 556 s. Mock ON: 0 errors / 0 crashes in
+  10 single + 25 swarm + 25 dry-run games; prompt median **6.5k chars (~2.6k tokens, rough)**, max 7.2k.
+  Random mock plans score below the brain, as expected (they measure plumbing, not play).
+- Verdict: INFO — plumbing ready. Play quality is unmeasured until the Kaggle GPU dev run.
+
+## 2026-09-26 — Promoted: pruned brain becomes the local champion (owner decision; not submitted)
+- Change: `eval/champion/my_agent.py` = current `agent/my_agent.py` (pruned brain + look merge);
+  previous champion archived as `experiments/2026-09-25_floor_v1/my_agent.py`.
+- Command: `cp agent/my_agent.py eval/champion/my_agent.py && eval/regression_check.py --update`
+- Result: CI smoke baseline 1.1812 score / 1.00 levels (ls20+vc33, 3 reps, 400 actions); check PASS.
+- Verdict: PROMOTED on the owner's call (tie at N=30 with better robustness). No Kaggle push/submission.
+
+## 2026-09-26 — Merge first_look.py into look.py (behaviour-identical)
+- Change: owner request — both modules read the screen; `look.py` now holds the pure reading
+  helpers and `first_look` (the level inventory). Counter hiding in first_look inlined to avoid a
+  look <-> learn import cycle. Build order: settings, world, look, learn, goals, decide, brain, kaggle_agent.
+- Command: `eval/run.py --agent agent/my_agent.py --champion <pre-merge build> --reps 2 --max-actions 1500` + exact per-run comparison
+- Result: **50/50 identical runs**, 0 swallowed errors; mask_check 9/9.
+- Verdict: INFO — pure restructure.
+
+## 2026-09-25 — Pruned agent (after ablation) vs full and vs champion
+- Change: deletions listed in the ablation entry + avatar step measured on the moved piece.
+- Command: `eval/run.py --agent experiments/2026-09-25_pruned/my_agent.py --champion experiments/2026-09-25_ablation/full.py --reps 30 --max-actions 2000`
+  (+ paired against the champion runs of the goals eval, same seeds)
+- Result: vs full **+0.019 ± 0.013 score (significant)**, +0.13 ± 0.38 levels; sp80 -0.07 (0/30,
+  lost the new-position/quick-test gain), m0r0 +0.41. vs champion: -0.024 ± 0.106 score,
+  **+0.87 ± 1.09 levels** (tie). 0 crashes, 0 swallowed errors. Size: 1256-line shipped file
+  (champion 836), 54 settings (was 58); the growth is the owner's belief modules.
+- Verdict: KEEP as the development baseline (better than the full build, smaller). Not promoted over
+  the champion (tie at N=30, rule 3); owner decides whether robustness fixes (memory guard,
+  background-avatar fix) justify replacing the champion anyway.
+
+## 2026-09-25 — Ablation: what each addition since the first champion contributes
+- Change: none to behaviour (switches added; all-on verified identical to the goals build, 50/50
+  runs). Each variant = one addition off; 10 agents in one run, same seeds.
+- Command: `eval/run.py --agent experiments/2026-09-25_ablation/full.py --variant <name>=<file> ... --reps 30 --max-actions 2000`
+- Result (Δ = variant minus full; negative = worse without the addition), 7500 runs, 0 crashes:
+  | addition removed | Δscore | Δlevels | verdict |
+  |---|---|---|---|
+  | timeout detection | -0.018 ± 0.066 | **-1.23 ± 1.02** | needed (tu93 -0.90, lp85 -0.37) |
+  | expected-cost rule | -0.017 ± 0.050 | -0.70 ± 0.80 | leaning useful |
+  | life-aware planning | -0.003 ± 0.080 | -0.60 ± 0.86 | leaning useful |
+  | new-position chance floor | +0.000 ± 0.001 | +0.03 ± 0.07 | nothing |
+  | quick tests | +0.013 ± 0.018 | +0.23 ± 0.41 | nothing |
+  | counter tracks on any line | -0.000 ± 0.000 | +0.00 ± 0.09 | nothing |
+  | hidden-state screen ids | +0.000 ± 0.000 | +0.07 ± 0.16 | nothing |
+  | colour wall/hazard predictions | **+0.018 ± 0.009** | +0.07 ± 0.16 | harmful |
+  | goal steering | +0.000 ± 0.006 | -0.03 ± 0.37 | nothing (at this budget) |
+- Verdict: PRUNE — deleted new-position floor, quick tests, hidden-state ids (+ avatar lock), colour
+  predictions and all switches; kept timeout detection, the expected-cost rule and life-aware
+  planning (the core decision rule), any-line counter tracks (the simpler rule, masks stay
+  correct), and the owner's beliefs (first look, colour roles, goals; goal steering on probation
+  pending a large-budget test). Found while checking: avatar step read (0,0) whenever the avatar
+  colour also sits still elsewhere (tu93) — now measured on the moved piece.
+
+## 2026-09-25 — Goals decided by the game (feature changes on each win) — NO EFFECT at 2000 actions
+- Change: `goals.py` — every screen gets generic features (colour counts, colour-colour touch
+  edges, what the avatar touches); on each level win the biggest relative changes between the
+  level's first and winning screen become goal hypotheses; later wins support/contradict them;
+  first-look same-shape pairs are weak pre-win cues. Frontier cost divided by 1 + progress.
+- Command: `eval/run.py --agent experiments/2026-09-25_goals/my_agent.py --champion eval/champion/my_agent.py --reps 30 --max-actions 2000`
+- Result: vs champion -0.043 ± 0.105 score, +0.73 ± 1.06 levels (NOISE). Paired vs first-look
+  (same seeds): score **-0.000 ± 0.006**, levels **+0.03 ± 0.37**. Qualitatively right: on tu93
+  hypotheses from the level-0 win were supported by the next 2 wins (3/0); wrong first-look cues
+  fell to 0.20. 0 crashes, 0 swallowed errors.
+- Verdict: NOISE. Goals exist only after a win and only reorder exploration; at 2000 actions most
+  games reach at most level 1-2, so there is little for them to steer. Needs a larger-budget test
+  (Kaggle gives far more actions per game) and/or stronger use than a frontier discount.
+
+## 2026-09-25 — First look + colour roles (owner's World design) vs champion and vs phase 2b — NOISE / tiny loss
+- Change: `first_look.py` (item kinds with purpose "?", patterns), `learn_what_touching_does`
+  (floor/wall/hazard/goal/pushable/collectible per colour, avatar step per key, multi-colour
+  avatar parts, collectible judged on stepping off), decide predicts keys into known wall/hazard
+  colours as useless/deadly; bug fix: background colour can no longer be picked as the avatar
+  (wa30/ka59/re86/tr87 had it). `eval/explain.py` prints the beliefs.
+- Command: `eval/run.py --agent experiments/2026-09-25_first_look/my_agent.py --champion eval/champion/my_agent.py --reps 30 --max-actions 2000`
+- Result: vs champion **-0.043 ± 0.104** score, **+0.70 ± 0.97** levels (NOISE). Paired against the
+  phase 2b candidate on the same seeds: score **-0.015 ± 0.012** (small but significant loss),
+  levels **-0.03 ± 0.24** (none). bp35 0/29/1 vs champion; sp80 30/0, tu93 +0.53 levels kept.
+  0 crashes, 0 swallowed errors. Beliefs verified readable/correct on ls20 (walls = colour 4,
+  avatar 12 + part 9, step 5) and wa30 (avatar 14 + part 0, step 4, a push-the-boxes layout).
+- Verdict: NOISE — not promoted. Knowing what things ARE does not yet change what the agent
+  DOES beyond wall avoidance; the payoff has to come from goals built on these beliefs.
+
+## 2026-09-25 — Restructure agent/core/ -> agent/brain/ (World of beliefs + fixed functions), behaviour-identical
+- Change: owner's design — `world.py` (belief dicts: counters, avatar, actions, rules, levels,
+  goals, deaths), `look.py`/`learn.py`/`decide.py` (fixed functions), `brain.py` (the loop),
+  `kaggle_agent.py` (framework adapter); clearer names throughout (settings renamed, see
+  settings.py). Removed code for rejected/unused features (replay, novelty bonus; both off).
+- Command: `eval/run.py --agent agent/my_agent.py --champion <pre-refactor build> --reps 2 --max-actions 1500`
+  then a per-run exact comparison of (levels, per-level actions, total actions).
+- Result: first attempt 21/50 identical — a missed rename (`arrived_by`) raised in every
+  choose_action and the MyAgent safety net silently played randomly (296/300 steps). Fixed:
+  **50/50 identical, 0 swallowed errors**. `eval/regression_check.py` now fails on any swallowed
+  choose_action exception. mask_check 9/9, build check OK.
+- Verdict: INFO — pure restructure. Smoke regression still FAILs vs the champion baseline
+  (1.1857 < 1.2847) because agent/brain carries the unpromoted phase 2 changes (N=30 all-games:
+  NOISE, -0.028 ± 0.107). Owner decision pending: re-baseline or revert.
+
+## 2026-09-25 — Phase 2b (2a + any-line tick masking, adaptive occlusion keys, speedups) vs champion — NOISE
+- Change: counter-track masking on any line with >=3 progressing tick positions (eval/mask_check.py
+  9/9); conflict-triggered occlusion underlay in state keys (g50t conflicts 153 -> ~44, fallbacks
+  878 -> 0; always-on version broke tu93 3 -> 0 levels on 3/3 seeds, hence adaptive); tracker
+  counters + periodic refit (~5.3 -> 3.9 ms/action on re86).
+- Command: `eval/run.py --agent experiments/2026-09-25_phase2b/my_agent.py --champion eval/champion/my_agent.py --reps 30 --max-actions 2000`
+- Result: 0.601 ± 0.072 vs 0.628 ± 0.106; paired **-0.028 ± 0.107**; total levels 20.77 vs 20.03,
+  paired **+0.73 ± 0.92**. sp80 +0.08 (30/0/0), tu93 +0.53 levels, m0r0 +0.20 levels, sk48 first
+  levels (3 reps); lp85 -0.78 ± 2.27 and vc33 -0.51 ± 0.80 dominate the score noise. 0 crashes.
+- Verdict: NOISE — not promoted. Two rounds of fixes to the screen-graph explorer moved levels
+  by < 1/rep; supports pivoting to a belief-state (objects/map/rules/goals) architecture.
+
+## 2026-09-25 — Phase 2a (timeouts, expected-cost frontier, life-aware planning, position novelty, local probe) vs champion — NOISE
+- Change: `_is_timeout` (deaths at a repeated life length = step-budget timeouts, un-recorded);
+  frontier cost `(d+1)/p` replacing `d + 10(1-p)`; frontiers beyond the life budget skipped,
+  voluntary RESET (life > 0 only) when nothing reachable remains; `P_NOVEL_POSITION` floor for
+  (avatar position, action) never tried; local probe of usually-stationary simple actions.
+  Motivation (dev diag, single seeds): sp80's 4-step solution `4,4,4,5` took 938 actions because
+  ACTION5's global no-op rate demoted it everywhere; 44/44 sp80 "deaths" were timeouts.
+- Command: `eval/run.py --agent experiments/2026-09-25_phase2a/my_agent.py --champion eval/champion/my_agent.py --reps 30 --max-actions 2000`
+- Result: 0.658 ± 0.128 vs 0.628 ± 0.106; paired **+0.030 ± 0.136**; total levels 20.93 vs
+  20.03, paired +0.90 ± 1.03. Per game: sp80 +0.12 (30/0/0), tu93 +0.63 levels (20/10), sc25
+  +0.26; lp85 ±3.21 CI dominates the aggregate noise. 0 crashes.
+- Verdict: NOISE — not promoted. Targeted gains real but small; carried into phase2b.
+
+## 2026-09-25 — First competition submission: floor champion (kernel v2)
+- Change: none — `kaggle competitions submit ... -k hawkosm/arc-agi-3-agent -v 2` (run by owner)
+- Result: ref 56548792, PENDING at 11:00 UTC. CLI: "0 submissions remaining today" → rules §2
+  confirmed **1 submission per day** (not 5 as the starter README says).
+- Result (COMPLETE): public LB **0.44** (local N=30 on the 25 public games: 0.628 ± 0.106 @2000
+  actions; Kaggle ran until the 7.5 h time budget with no action cap).
+- Verdict: INFO — first calibration point: hidden-set score ≈ 0.70 × local public-set score, even
+  with a far larger action budget on Kaggle. Local gains must be large to be visible on the LB.
+
 ## 2026-09-25 — Parity fix: Kaggle runtime numpy is 2.0.2, not the 2.4.4 wheel
 - Change: Makefile pin numpy==2.4.4 → 2.0.2. Kernel v2 log shows pip keeping the image's
   preinstalled numpy 2.0.2 ("Requirement already satisfied ... (2.0.2)").

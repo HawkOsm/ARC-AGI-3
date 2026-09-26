@@ -7,7 +7,7 @@ Kaggle competition (interactive reasoning games; deadline 2026-11-02).
 
 | | |
 |---|---|
-| `agent/core/` | the agent (edit here) |
+| `agent/brain/` | the agent (edit here) — start with `brain.py`, beliefs in `world.py` |
 | `agent/my_agent.py` | generated single file that ships (`make build`) |
 | `eval/` | local harness: `run.py` (N-repeat / paired / swarm), `kaggle_sim.py`, `interface_checks.py`, `regression_check.py`, `champion/` |
 | `docs/` | `ROADMAP.md`, `GAME_GUIDE.md`, `tests/LOG.md`, `tests/IDEAS_TRIED.md`, `STARTER_README.md` |

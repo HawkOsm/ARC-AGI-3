@@ -34,7 +34,7 @@ REPS            ?= 30
 BUDGET          ?= 2000
 
 .PHONY: help setup play-local pull-sample notebook submit status verify-local clean _check-kaggle \
-        build check interface eval eval-paired eval-swarm ci
+        build check interface maskcheck eval eval-paired eval-swarm ci
 
 _check-kaggle:
 	@if [ -z "$(KAGGLE_TOKEN_FILE)" ] || [ ! -s "$(KAGGLE_TOKEN_FILE)" ]; then \
@@ -99,7 +99,7 @@ clean: ## Remove generated artefacts (venv, downloaded games, vendored repos)
 
 # ── Project additions (not in the upstream starter) ─────────────────────────
 
-build: ## Regenerate agent/my_agent.py from agent/core/
+build: ## Regenerate agent/my_agent.py from agent/brain/
 	$(VENV_PY) scripts/build_submission.py
 
 check: ## Lint + verify agent/my_agent.py is freshly built
@@ -118,5 +118,8 @@ eval-paired: build ## Paired AGENT vs eval/champion/my_agent.py
 eval-swarm: build ## All games as threads in one process (Kaggle's execution model)
 	$(VENV_PY) eval/run.py --agent $(AGENT) --swarm --max-actions $(BUDGET)
 
-ci: check interface ## What CI runs: lint, build check, interface facts, smoke regression
+maskcheck: ## HUD-counter masking == known counter tracks (all characterised games)
+	$(VENV_PY) eval/mask_check.py
+
+ci: check interface maskcheck ## Local superset of CI: lint, build check, interface facts, masks, smoke regression
 	$(VENV_PY) eval/regression_check.py

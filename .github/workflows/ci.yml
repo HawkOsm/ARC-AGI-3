@@ -25,11 +25,14 @@ jobs:
       - name: Starter smoke test (also downloads ls20 + vc33)
         run: make verify-local
 
-      - name: Lint + agent/my_agent.py freshly built from agent/core/
+      - name: Lint + agent/my_agent.py freshly built from agent/brain/
         run: make check
 
       - name: Interface facts the agent depends on
         run: make interface
+
+      - name: HUD-counter masking on the smoke games
+        run: .venv/bin/python eval/mask_check.py ls20,vc33
 
       - name: Smoke regression vs logged champion baseline (process + swarm)
         run: .venv/bin/python eval/regression_check.py

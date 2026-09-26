@@ -1,7 +1,7 @@
 # Roadmap
 
 Competition: ARC Prize 2026 — ARC-AGI-3 (Kaggle), final deadline **2026-11-02**. Public LB top on
-2026-09-25: 19.45 (score is 0–100). 5 submissions/day.
+2026-09-25: 19.45 (score is 0–100). **1 submission/day** (rules §2) → ~38 left at 2026-09-25.
 
 ## Where we are (2026-09-25)
 
@@ -11,7 +11,7 @@ Competition: ARC Prize 2026 — ARC-AGI-3 (Kaggle), final deadline **2026-11-02*
 - ✅ Eval harness (`eval/run.py`): N-repeat, official scorecard, paired champion-vs-candidate,
   swarm mode. Kaggle emulator (`eval/kaggle_sim.py`) runs the real notebook against a local
   competition-mode gateway.
-- ✅ Floor agent (`agent/core/`): masked state graph + learned action model + avatar tracking +
+- ✅ Floor agent (now `agent/brain/`): masked state graph + learned action model + avatar tracking +
   verified BFS navigation. Beats random at N=30 (LOG.md).
 - ⏳ **Kaggle Phase A/B pipeline check — blocked on the owner accepting the competition rules**
   (`kaggle` CLI: `userHasEntered: False`, data download 403). Commands are ready (AGENT.md).
@@ -19,9 +19,10 @@ Competition: ARC Prize 2026 — ARC-AGI-3 (Kaggle), final deadline **2026-11-02*
 ## Phases
 
 ### Phase 1 — pipeline truth (now)
-1. Owner accepts rules → push the random baseline (`make submit AGENT=experiments/2026-09-25_random_baseline/my_agent.py`),
-   Phase A completes, submit → confirms the pipeline end to end (expected LB ≈ 0).
-2. Submit the floor champion → first real LB number. Compare against local N=30 aggregate: the
+1. ✅ Rules accepted; kernel v1 (random) and v2 (floor) Phase A complete. The random-baseline
+   Phase B was skipped (1 submission/day makes it a waste; the floor submission tests the
+   same pipeline).
+2. ✅ Floor champion submitted 2026-09-25 (ref 56548792): **LB 0.44** vs local 0.628 → hidden ≈ 0.70 × public. Compare against local N=30 aggregate: the
    ratio (LB / local) is the first calibration point for how much public-set scores transfer.
 3. Replay question: settled locally — under a competition-mode gateway (eval/kaggle_sim.py) the
    level-start full reset is intercepted and the gain vanishes (9.76 → 1.36). Only revisit if a
@@ -53,5 +54,9 @@ on the full public set before any submission uses GPU quota.
 - **No promotion from a single-game or two-game gain**, and no promotion without a paired N≥30
   run against the current champion (AGENT.md rule 3).
 - **No reliance on the max-over-plays replay lever** unless Kaggle behaviour is confirmed.
-- **No LLM-primary agent.** Programmatic floor first; LLM as rescue only.
-- **No GPU accelerator** while the agent is rule-based (`ACCELERATOR = "cpu"`).
+- **No model training or fine-tuning** (owner decision 2026-09-26: it slows development). Learning
+  happens at play time in the World beliefs; pre-trained models only as-is, inference only.
+- ~~No LLM-primary agent.~~ Changed 2026-09-26 (owner, after the community research: every top
+  entry runs a local LLM). When the advisor is on it proposes most actions on unsolved levels; the
+  brain still replays solved levels, owns RESET, and takes over whenever the LLM fails.
+- **No GPU accelerator** while the agent is rule-based (`ACCELERATOR = "cpu"`). The LLM dev runs use the RTX PRO 6000 (30 h/week GPU quota).
