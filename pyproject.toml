@@ -13,3 +13,14 @@ max-complexity = 15
 [tool.ruff.lint.per-file-ignores]
 # Upstream starter-kit file; its sys.path setup must precede the framework imports.
 "scripts/play_local.py" = ["E402"]
+# HTML/CSS template and one-line markup builders.
+"eval/dashboard.py" = ["E501"]
+"eval/trace_viewer.py" = ["E501"]
+
+[tool.mypy]
+# The "compiler" for agent/brain/ (Python written like Java: typed classes, enums, one job per class).
+python_version = "3.12"
+files = ["agent/brain"]
+check_untyped_defs = true
+warn_unused_ignores = true
+ignore_missing_imports = true  # arcengine / agents (framework) ship no type stubs

@@ -111,8 +111,15 @@ LLM_TIMEOUT_THINKING_S = 1200
 # Qwen3.8's recommended sampling (model README), per mode
 LLM_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}
 LLM_SAMPLING_THINKING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presence_penalty": 0.0}
+# The server may only produce JSON matching PLAN_SCHEMA (vLLM structured outputs). Without it the
+# local 4B model spent 3/3 answers' 1,024 tokens reasoning in prose and never reached the plan.
+LLM_STRUCTURED_OUTPUT = True
 LLM_PLAN_MAX = 8  # actions taken from one answer before asking again
 LLM_RECENT_STEPS = 16  # recent steps (action -> what happened) shown to the model
+# At most this many requests are in flight; other games wait on our side, so the timeout measures the
+# server's work, not its queue (all games ask at once at the start; the local 8 GB card's cache holds ~9
+# prompts, and 6/25 of the opening burst timed out at 180 s in the queue, pausing the advisor).
+LLM_MAX_CONCURRENT = 32
 LLM_FAILS_BEFORE_PAUSE = 3  # failed requests in a row (any game) ...
 LLM_PAUSE_S = 300  # ... pause the advisor for everyone this long
 

@@ -1,15 +1,15 @@
-"""BRAIN — the loop. One Brain plays one game.
+"""BRAIN — the orchestrator. One Brain plays one game.
 
 Every step (Brain.next_action):
-    1. LOOK     the frame arrives -> settled picture
+    1. LOOK     the frame arrives -> settled picture                    (look.ScreenReader)
     2. EVENTS   died? level up? new play?  (the level change is the only real reward)
-    3. LEARN    first screen of a level? take a first look (look.first_look).
-                What did my last action do? update the beliefs in self.world
-    4. DECIDE   follow the LLM advisor's plan if one is on (llm.py), otherwise pick the
-                next action from the beliefs (decide.py)
+    3. LEARN    first screen of a level? take a first look                (look.FirstLook)
+                What did my last action do? update the beliefs          (learn.*Learner, goals.GoalTracker)
+    4. DECIDE   follow the LLM advisor's plan if one is on               (llm.Advisor)
+                otherwise pick the next action from the beliefs           (decide.Explorer)
 
-Long-term beliefs live in `self.world` (see world.py). Everything else on the Brain
-is short-term working memory: what just happened, and the route being followed.
+Long-term beliefs live in `self.world` (world.World). Short-term memory - what just happened
+and the route being followed - lives in `self.memory` (world.WorkingMemory).
 """
 from __future__ import annotations
 
@@ -18,27 +18,23 @@ from collections import defaultdict, deque
 
 import numpy as np
 
-from .decide import candidate_actions, choose_next_action
-from .goals import goals_from_first_look, learn_goals_from_win, screen_features
-from .learn import (
-    avatar_position,
-    hide_counters,
-    is_timeout_death,
-    learn_what_touching_does,
-    record_action_result,
-    update_avatar,
-    update_counters,
-)
-from .llm import advisor, describe, describe_step
-from .look import first_look, settled_grid
+from .decide import Explorer
+from .goals import GoalTracker, ScreenFeatures
+from .learn import ActionLearner, AvatarLearner, CounterLearner, DeathJudge, TouchLearner
+from .llm import PromptWriter, advisor
+from .look import FirstLook, ScreenReader
 from .settings import LLM_RECENT_STEPS
+from .trace import Tracer
 from .world import (
     DIED,
     LEVEL_UP,
     NO_INFO,
     RESET_ACTION,
+    Action,
+    Death,
     LevelMemory,
     Screen,
+    WorkingMemory,
     World,
     compress_grid,
     decompress_grid,
@@ -46,134 +42,156 @@ from .world import (
 
 
 class Brain:
-    def __init__(self, seed: int = 0) -> None:
+    def __init__(self, seed: int = 0, name: str = "") -> None:
+        self.name = name  # the game id, for logs only
         self.rng = random.Random(seed)
         self.world = World()
-        # ── working memory ──
-        self.level: int | None = None
-        self.last_grid: np.ndarray | None = None  # picture before last_action
-        self.last_screen_id: int | None = None
-        self.screen_before_last_id: int | None = None
-        self.last_action: tuple | None = None
-        self.came_by: tuple | None = None  # the action that brought us to this screen
-        self.route: list = []  # planned [(action, screen it should lead to), ...]
-        self.expected_screen = None  # where the route's last step should have taken us
-        self.at_level_start = False
-        self.life_length = 0  # actions since the last reset / level start
-        self.pixel_scans: dict[int, int] = {}  # level -> screens given a 1-pixel click scan
-        self.plan: list = []  # the LLM advisor's remaining actions
-        self.last_from_advisor = False
-        self.ask_again_at = 0  # after an empty answer the brain plays a few steps first
-        self.recent: deque = deque(maxlen=LLM_RECENT_STEPS)  # "ACTIONn -> what happened", for the advisor
-        self.stats: dict[str, int] = defaultdict(int)  # diagnostics only
+        self.memory = WorkingMemory(recent=deque(maxlen=LLM_RECENT_STEPS))
+        self.stats: defaultdict[str, int] = defaultdict(int)  # diagnostics only
+        # the learners (the only writers of beliefs)
+        self.first_look = FirstLook(self.world)
+        self.counter_learner = CounterLearner(self.world)
+        self.avatar_learner = AvatarLearner(self.world)
+        self.touch_learner = TouchLearner(self.world)
+        self.action_learner = ActionLearner(self.world)
+        self.death_judge = DeathJudge(self.world)
+        self.goals = GoalTracker(self.world)
+        # the deciders
+        self.explorer = Explorer(self.world, self.memory, self.goals, self.rng, self.stats, self.restart_level)
+        self.prompt = PromptWriter(self.world, self.memory, self.stats)
+        self.tracer = Tracer.for_game(name)  # None unless ARC3_TRACE_DIR is set
 
     # ── public ──────────────────────────────────────────────────────────────
 
     def next_action(self, state: str, frame_layers, levels_completed: int, available: list[int],
-                    full_reset: bool = False) -> tuple:
+                    full_reset: bool = False) -> Action:
         """The whole agent: given the latest frame, return (action_id, x, y)."""
         action = self._think(state, frame_layers, levels_completed, available, full_reset)
+        if self.tracer is not None:
+            self.tracer.record(state, ScreenReader.settled_grid(frame_layers), action, self.world, self.memory,
+                               self.stats)
         self.stats["actions"] += 1
-        self.life_length = 0 if action == RESET_ACTION else self.life_length + 1
+        self.memory.life_length = 0 if action == RESET_ACTION else self.memory.life_length + 1
         return action
 
     def forget_last_action(self) -> None:
         """The last action never reached the game (network error): learn nothing from it."""
-        self.last_action = None
-        self.route, self.expected_screen = [], None
+        self.memory.last_action = None
+        self.memory.route, self.memory.expected_screen = [], None
 
-    def restart_level(self) -> tuple:
+    def restart_level(self) -> Action:
         """RESET. Only ever sent after GAME_OVER or after steps were taken in this life:
         a RESET with 0 steps taken in the level restarts the WHOLE GAME."""
-        self.world.avatar["under"] = None
-        self.route, self.expected_screen, self.plan = [], None, []
-        self.recent.append("RESET -> the level restarts")
-        self.last_action, self.last_grid, self.came_by = RESET_ACTION, None, None
-        self.at_level_start = True
+        m = self.memory
+        self.world.avatar.under = None
+        m.route, m.expected_screen, m.plan = [], None, []
+        self._remember("RESET -> the level restarts")
+        m.last_action, m.last_grid, m.came_by = RESET_ACTION, None, None
+        m.at_level_start = True
         return RESET_ACTION
 
     # ── the loop ────────────────────────────────────────────────────────────
 
-    def _think(self, state, frame_layers, level, available, full_reset) -> tuple:
+    def _think(self, state, frame_layers, level, available, full_reset) -> Action:
+        m = self.memory
+        m.why = ""
         # 1. LOOK
-        grid = settled_grid(frame_layers)
+        grid = ScreenReader.settled_grid(frame_layers)
         # 2. EVENTS
         if state == "NOT_PLAYED" or (grid is None and state != "GAME_OVER"):
+            m.why = "start the game"
             return self.restart_level()
         if state == "GAME_OVER":
             self._on_death()
+            m.why = "game over: RESET the level"
             return self.restart_level()
+        assert grid is not None
         if full_reset:
             self._on_new_play()
-        if self.level is None:
-            self.level = level
-            self.at_level_start = True
-        elif level > self.level or state == "WIN":
-            self._on_level_up(level if level > self.level else self.level + 1)
+        if m.level is None:
+            m.level = level
+            m.at_level_start = True
+        elif level > m.level or state == "WIN":
+            self._on_level_up(level if level > m.level else m.level + 1)
             if state == "WIN":
+                m.why = "the whole game is won"
                 return self.restart_level()
-        elif level < self.level:
+        elif level < m.level:
             self._on_new_play()
-            self.level = level
-            self.at_level_start = True
+            m.level = level
+            m.at_level_start = True
+        assert m.level is not None
 
         # 3. LEARN
-        level_map = self.world.levels.setdefault(self.level, LevelMemory())
+        if self.action_learner.note_available(available):
+            self.stats["mode_changes"] += 1
+        level_map = self.world.levels.setdefault(m.level, LevelMemory())
         if not level_map.items:
-            first_look(self.world, self.level, grid)
-            goals_from_first_look(self.world, self.level)
+            self.first_look.look(m.level, grid)
+            self.goals.cues_from_first_look(m.level)
         self._learn_from_last_move(grid)
         screen_id = self._screen_id(grid)
         screen = self._remember_screen(level_map, screen_id, grid, available)
-        if self.at_level_start:
+        if m.at_level_start:
             if level_map.start_screen is None:
                 level_map.start_screen = screen_id
-            self.at_level_start = False
-        if self.last_action is not None and self.last_action != RESET_ACTION:
+            m.at_level_start = False
+        if m.last_action is not None and m.last_action != RESET_ACTION:
             self._record_move(level_map, screen_id)
-        if self.route and self.expected_screen is not None and self.expected_screen != screen_id:
+        if m.route and m.expected_screen is not None and m.expected_screen != screen_id:
             self.stats["route_mismatches"] += 1  # never trust a plan the world disagrees with
-            self.route = []
+            m.route = []
         self._note_last_step(grid, screen_id)
 
         # 4. DECIDE
         action = self._advice(level_map, grid, available)
-        self.last_from_advisor = action is not None
+        m.last_from_advisor = action is not None
         if action is None:
-            action = choose_next_action(self, level_map, screen, available)
-        self.screen_before_last_id = self.last_screen_id if self.last_action != RESET_ACTION else None
-        self.last_grid, self.last_screen_id = grid, screen_id
-        self.last_action = action
+            action = self.explorer.choose(level_map, screen, available)
+        m.screen_before_last_id = m.last_screen_id if m.last_action != RESET_ACTION else None
+        m.last_grid, m.last_screen_id = grid, screen_id
+        m.last_action = action
         return action
+
+    def _remember(self, line: str) -> None:
+        """One line of history ("ACTIONn -> what happened"), for the advisor and traces."""
+        self.memory.recent.append(line)
+        self.memory.last_outcome = line
 
     def _note_last_step(self, grid: np.ndarray, screen_id: int) -> None:
         """History line for the advisor; an advised action that changed nothing ends its plan."""
-        if self.last_action is None or self.last_action == RESET_ACTION or self.last_grid is None:
+        m = self.memory
+        if m.last_action is None or m.last_action == RESET_ACTION or m.last_grid is None:
             return
-        self.recent.append(describe_step(self.last_action, hide_counters(self.world, self.last_grid),
-                                         hide_counters(self.world, grid), None))
-        if self.last_from_advisor and screen_id == self.last_screen_id and self.plan:
+        hide = self.world.counters.hide
+        self._remember(PromptWriter.describe_step(m.last_action, hide(m.last_grid), hide(grid), None))
+        if m.last_from_advisor and screen_id == m.last_screen_id and m.plan:
             self.stats["llm_plans_dropped"] += 1  # the plan expected something; nothing happened
-            self.plan = []
+            m.plan = []
 
-    def _advice(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> tuple | None:
+    def _advice(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
         """The advisor's next action, or None (advisor off, level already solved, no usable answer)."""
+        m = self.memory
         adviser = advisor()
         if adviser is None or level_map.has_solution:
-            self.plan = []
+            m.plan = []
             return None
-        if not self.plan and adviser.available() and self.stats["actions"] >= self.ask_again_at:
+        if not m.plan and adviser.available() and self.stats["actions"] >= m.ask_again_at:
             self.stats["llm_questions"] += 1
-            self.plan = adviser.propose(describe(self, grid, available), available)
-            if self.plan:
+            advice = adviser.propose(self.prompt.describe(grid, available), available, tag=self.name)
+            m.plan = list(advice.plan)
+            m.theory = advice.theory or m.theory
+            if m.plan:
                 self.stats["llm_plans"] += 1
+                m.plan_size = len(m.plan)
             else:
-                self.ask_again_at = self.stats["actions"] + 4
-        while self.plan:
-            action = self.plan.pop(0)
+                m.ask_again_at = self.stats["actions"] + 4
+        while m.plan:
+            action = m.plan.pop(0)
             if action[0] in available:
-                self.route, self.expected_screen = [], None
+                m.route, m.expected_screen = [], None
                 self.stats["llm_actions"] += 1
+                m.why = f"LLM plan, step {m.plan_size - len(m.plan)} of {m.plan_size}"
                 return action
         return None
 
@@ -181,55 +199,59 @@ class Brain:
 
     def _learn_from_last_move(self, grid: np.ndarray) -> None:
         """Update counters (and re-identify all screens if they grew) and the avatar."""
-        if self.last_grid is None or self.last_action in (None, RESET_ACTION):
+        m, world = self.memory, self.world
+        if m.last_grid is None or m.last_action in (None, RESET_ACTION):
             return
-        before = hide_counters(self.world, self.last_grid)
-        if update_counters(self.world, self.last_grid, grid):
+        assert m.last_action is not None
+        before = world.counters.hide(m.last_grid)
+        if self.counter_learner.learn(m.last_grid, grid):
             self.stats["counter_mask_updates"] += 1
-            for level_map in self.world.levels.values():
+            for level_map in world.levels.values():
                 level_map.rename_screens(self._screen_id_from_snapshot)
-            self.last_screen_id = self._screen_id(self.last_grid)
-            self.screen_before_last_id = None
-            self.route, self.expected_screen = [], None
-            before = hide_counters(self.world, self.last_grid)
-        after = hide_counters(self.world, grid)
-        update_avatar(self.world, before, after, self.last_action[0])
-        learn_what_touching_does(self.world, before, after, self.last_action[0])
+            m.last_screen_id = self._screen_id(m.last_grid)
+            m.screen_before_last_id = None
+            m.route, m.expected_screen = [], None
+            before = world.counters.hide(m.last_grid)
+        after = world.counters.hide(grid)
+        self.avatar_learner.learn(before, after, m.last_action[0])
+        self.touch_learner.learn(before, after, m.last_action[0])
 
     def _record_move(self, level_map: LevelMemory, screen_id: int) -> None:
         """Last screen + last action -> this screen. Also teaches world.actions."""
-        previous = level_map.screens.get(self.last_screen_id)
+        m = self.memory
+        assert m.last_action is not None and m.last_screen_id is not None
+        previous = level_map.screens.get(m.last_screen_id)
         if previous is None:
             return
-        if not level_map.record_result(self.last_screen_id, self.last_action, screen_id):
+        if not level_map.record_result(m.last_screen_id, m.last_action, screen_id):
             self.stats["contradictions"] += 1
-            self.route = []
-        changed = screen_id != self.last_screen_id
+            m.route = []
+        changed = screen_id != m.last_screen_id
         undid = None
-        if self.screen_before_last_id is not None and self.screen_before_last_id != self.last_screen_id:
-            undid = screen_id == self.screen_before_last_id
-        record_action_result(self.world, self.last_action, previous.candidates.get(self.last_action, NO_INFO),
-                             changed, False, previous.avatar_at, undid, self.came_by)
-        self.came_by = self.last_action if changed else self.came_by
+        if m.screen_before_last_id is not None and m.screen_before_last_id != m.last_screen_id:
+            undid = screen_id == m.screen_before_last_id
+        self.action_learner.record(m.last_action, previous.candidates.get(m.last_action, NO_INFO),
+                                   changed, False, previous.avatar_at, undid, m.came_by)
+        m.came_by = m.last_action if changed else m.came_by
 
     # ── screen identity ─────────────────────────────────────────────────────
 
     def _screen_id(self, grid: np.ndarray) -> int:
         """What makes a screen THIS screen: the picture minus counters."""
-        return hash(hide_counters(self.world, grid).tobytes())
+        return hash(self.world.counters.hide(grid).tobytes())
 
     def _screen_id_from_snapshot(self, snapshot: bytes) -> int:
-        return self._screen_id(decompress_grid(snapshot, self.world.counters["shape"]))
+        return self._screen_id(decompress_grid(snapshot, self.world.counters.shape))
 
     def _remember_screen(self, level_map: LevelMemory, screen_id: int, grid: np.ndarray,
                          available: list[int]) -> Screen:
         screen = level_map.screens.get(screen_id)
         if screen is not None:
             return screen
-        candidates = candidate_actions(self.world, grid, available)
-        screen = Screen(screen_id, candidates, avatar_position(self.world, hide_counters(self.world, grid)),
-                        compress_grid(grid))
-        screen.features = screen_features(self.world, grid)
+        world = self.world
+        candidates = self.explorer.candidate_actions(grid, available)
+        screen = Screen(screen_id, candidates, world.avatar.position(world.counters.hide(grid)), compress_grid(grid))
+        screen.features = ScreenFeatures.of(world, grid)
         level_map.screens[screen_id] = screen
         self.stats["screens"] += 1
         return screen
@@ -237,52 +259,57 @@ class Brain:
     # ── events ──────────────────────────────────────────────────────────────
 
     def _on_death(self) -> None:
+        m, world = self.memory, self.world
         self.stats["deaths"] += 1
-        self.plan = []
-        if self.last_action not in (None, RESET_ACTION):
-            self.recent.append(describe_step(self.last_action, None, None, "you lost a life; the level restarts"))
-        level_map = self.world.levels.get(self.level)
-        if level_map is None or self.last_screen_id is None or self.last_action in (None, RESET_ACTION):
+        m.plan = []
+        if m.last_action not in (None, RESET_ACTION):
+            assert m.last_action is not None
+            self._remember(PromptWriter.describe_step(m.last_action, None, None, "you lost a life; the level restarts"))
+        level_map = world.levels.get(m.level) if m.level is not None else None
+        if level_map is None or m.last_screen_id is None or m.last_action in (None, RESET_ACTION):
             return
-        previous = level_map.screens.get(self.last_screen_id)
-        deaths_before = len(self.world.deaths)
-        if is_timeout_death(self.world, self.level, self.life_length):
-            self.stats["timeouts"] += 1 + deaths_before - len(self.world.deaths)
+        assert m.last_action is not None and m.level is not None
+        previous = level_map.screens.get(m.last_screen_id)
+        deaths_before = len(world.deaths)
+        if self.death_judge.is_timeout(m.level, m.life_length):
+            self.stats["timeouts"] += 1 + deaths_before - len(world.deaths)
             return
-        level_map.record_result(self.last_screen_id, self.last_action, DIED)
-        if self.last_grid is not None:
-            learn_what_touching_does(self.world, hide_counters(self.world, self.last_grid), None,
-                                     self.last_action[0], outcome="died")
+        level_map.record_result(m.last_screen_id, m.last_action, DIED)
+        if m.last_grid is not None:
+            self.touch_learner.learn(world.counters.hide(m.last_grid), None, m.last_action[0], outcome=DIED)
         if previous is not None:
-            record_action_result(self.world, self.last_action, previous.candidates.get(self.last_action, NO_INFO),
-                                 True, True, previous.avatar_at, None, None)
-            self.world.deaths.append((self.level, self.life_length, previous, self.last_action, previous.avatar_at))
+            self.action_learner.record(m.last_action, previous.candidates.get(m.last_action, NO_INFO),
+                                       True, True, previous.avatar_at, None, None)
+            world.deaths.append(Death(m.level, m.life_length, previous, m.last_action, previous.avatar_at))
 
     def _on_level_up(self, new_level: int) -> None:
+        m, world = self.memory, self.world
         self.stats["level_ups"] += 1
-        self.plan = []
-        if self.last_action not in (None, RESET_ACTION):
-            self.recent.append(describe_step(self.last_action, None, None, "LEVEL COMPLETE; a new level starts"))
-        self.life_length = 0
-        level_map = self.world.levels.get(self.level)
-        if level_map is not None and self.last_screen_id is not None \
-                and self.last_action not in (None, RESET_ACTION):
-            level_map.record_result(self.last_screen_id, self.last_action, LEVEL_UP)
-            if self.last_grid is not None:
-                learn_what_touching_does(self.world, hide_counters(self.world, self.last_grid), None,
-                                         self.last_action[0], outcome="level_up")
-            winning_screen = level_map.screens.get(self.last_screen_id)
+        m.plan = []
+        if m.last_action not in (None, RESET_ACTION):
+            assert m.last_action is not None
+            self._remember(PromptWriter.describe_step(m.last_action, None, None, "LEVEL COMPLETE; a new level starts"))
+        m.life_length = 0
+        level_map = world.levels.get(m.level) if m.level is not None else None
+        if level_map is not None and m.last_screen_id is not None \
+                and m.last_action not in (None, RESET_ACTION):
+            assert m.last_action is not None and m.level is not None
+            level_map.record_result(m.last_screen_id, m.last_action, LEVEL_UP)
+            if m.last_grid is not None:
+                self.touch_learner.learn(world.counters.hide(m.last_grid), None, m.last_action[0],
+                                         outcome=LEVEL_UP)
+            winning_screen = level_map.screens.get(m.last_screen_id)
             if winning_screen is not None:
-                learn_goals_from_win(self.world, self.level, level_map, winning_screen)
-                self.stats["goals_known"] = len(self.world.goals)
-        self.level = new_level
-        self.world.avatar["under"] = None
-        self.last_action, self.last_grid, self.came_by = None, None, None
-        self.route, self.expected_screen = [], None
-        self.at_level_start = True
+                self.goals.learn_from_win(m.level, level_map, winning_screen)
+                self.stats["goals_known"] = len(world.goals)
+        m.level = new_level
+        world.avatar.under = None
+        m.last_action, m.last_grid, m.came_by = None, None, None
+        m.route, m.expected_screen = [], None
+        m.at_level_start = True
 
     def _on_new_play(self) -> None:
         """A full reset happened (back to level 1)."""
-        self.plan = []
-        self.level = 0
-        self.at_level_start = True
+        self.memory.plan = []
+        self.memory.level = 0
+        self.memory.at_level_start = True

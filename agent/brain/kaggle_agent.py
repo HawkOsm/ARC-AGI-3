@@ -54,7 +54,7 @@ class MyAgent(Agent):
         seed = int(base) if base is not None else int(time.time() * 1e6)
         seed = (seed + zlib.crc32(self.game_id.encode())) % (2**31)
         self.rng = random.Random(seed)
-        self.brain = Brain(seed=seed)
+        self.brain = Brain(seed=seed, name=self.game_id)
         self._click: dict = {}  # this game's ACTION6 coordinates
         self.errors = 0
         self.consecutive_errors = 0
@@ -132,8 +132,8 @@ class MyAgent(Agent):
         world = self.brain.world
         s = dict(self.brain.stats)
         s["errors"] = self.errors
-        s["avatar_colour"] = world.avatar["colour"]
-        s["ignored_cells"] = int(world.counters["ignore"].sum())
+        s["avatar_colour"] = world.avatar.colour
+        s["ignored_cells"] = int(world.counters.ignore.sum())
         s["levels_mapped"] = len(world.levels)
-        s["steps_per_life"] = dict(world.rules["steps_per_life"])
+        s["steps_per_life"] = dict(world.rules.steps_per_life)
         return s

@@ -8,10 +8,12 @@ plan as soon as the game surprises it (a death, a new level, an action that chan
 No answer, a slow answer or an unreadable answer -> the brain decides exactly as before.
 Nothing here is game-specific.
 
-    advisor()                            the shared client for all game threads (None when off)
-    Advisor.propose(prompt, available)   -> [action, ...] (may be empty)
-    describe(brain, grid, available)     the prompt: rules of the setting, beliefs, recent steps, screen
-    parse_plan(text, available)          the model's answer -> [action, ...]
+    advisor()                              the shared client for all game threads (None when off)
+    Advisor.propose(prompt, available)     -> Advice(plan=[Action, ...], theory) (plan may be empty)
+    PromptWriter(world, memory, stats)
+      .describe(grid, available)           the prompt: beliefs, recent steps, the screen
+      .describe_step(action, before, after, outcome)   one line of history
+    parse_plan(text, available)            the model's answer -> [Action, ...]
 """
 from __future__ import annotations
 
@@ -21,19 +23,23 @@ import re
 import threading
 import time
 import urllib.request
+from collections import defaultdict
+from typing import NamedTuple
 
 import numpy as np
 
-from .learn import avatar_position, hide_counters
+from .world import Action, Goal, WorkingMemory, World
 from .settings import (
     LLM_FAILS_BEFORE_PAUSE,
     LLM_MAX_TOKENS,
+    LLM_MAX_CONCURRENT,
     LLM_MAX_TOKENS_THINKING,
     LLM_MODEL,
     LLM_PAUSE_S,
     LLM_PLAN_MAX,
     LLM_SAMPLING,
     LLM_SAMPLING_THINKING,
+    LLM_STRUCTURED_OUTPUT,
     LLM_THINKING,
     LLM_TIMEOUT_S,
     LLM_TIMEOUT_THINKING_S,
@@ -49,14 +55,35 @@ SYSTEM_PROMPT = (
     "Only the listed available actions can be used.\n"
     "- A level is won by reaching some goal state; the game then shows the next level. Many games have a "
     "step counter or lives shown on screen; running out loses the life and restarts the level.\n"
-    "- The score rewards finishing each level in as FEW actions as possible, so think first and avoid "
-    "pointless moves.\n\n"
-    "Answer with a short explanation of your current theory of the game, then end with ONE line of JSON:\n"
-    '{"plan": ["ACTION4", "ACTION4", "ACTION6 12 30"]}\n'
+    "- Every action counts against you, including ones that change nothing: finish each level in as FEW "
+    "actions as possible.\n\n"
+    "Answer with exactly one JSON object and nothing else:\n"
+    '{"theory": "<one or two sentences: what the game is and what you are trying>", '
+    '"plan": ["ACTION4", "ACTION4", "ACTION6 12 30"]}\n'
     "The plan holds 1 to 8 actions to take next, in order."
 )
 
+PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "theory": {"type": "string", "maxLength": 400},
+        "plan": {"type": "array", "minItems": 1, "maxItems": LLM_PLAN_MAX,
+                 "items": {"type": "string", "pattern": "^ACTION[1-7]( [0-9]{1,2} [0-9]{1,2})?$"}},
+    },
+    "required": ["theory", "plan"],
+    "additionalProperties": False,
+}
+
 _ACTION_RE = re.compile(r"ACTION([1-7])(?:\s+(\d{1,2})\s+(\d{1,2}))?")
+
+
+class Advice(NamedTuple):
+    """One answer: the actions to take and the model's stated theory of the game."""
+    plan: list[Action]
+    theory: str
+
+
+NO_ADVICE = Advice([], "")
 
 
 class Advisor:
@@ -70,6 +97,8 @@ class Advisor:
         self.max_tokens = int(env("ARC3_LLM_MAX_TOKENS", LLM_MAX_TOKENS_THINKING if self.thinking else LLM_MAX_TOKENS))
         self.timeout = float(env("ARC3_LLM_TIMEOUT_S", LLM_TIMEOUT_THINKING_S if self.thinking else LLM_TIMEOUT_S))
         self.sampling = LLM_SAMPLING_THINKING if self.thinking else LLM_SAMPLING
+        self.structured = env("ARC3_LLM_STRUCTURED", "1" if LLM_STRUCTURED_OUTPUT else "0") == "1"
+        self._in_flight = threading.BoundedSemaphore(int(env("ARC3_LLM_MAX_CONCURRENT", LLM_MAX_CONCURRENT)))
         self._lock = threading.Lock()
         self._fails_in_a_row = 0
         self._paused_until = 0.0
@@ -77,20 +106,31 @@ class Advisor:
     def available(self) -> bool:
         return time.time() >= self._paused_until
 
-    def propose(self, prompt: str, available: list[int]) -> list[tuple]:
+    def propose(self, prompt: str, available: list[int], tag: str = "") -> Advice:
+        """Ask for a plan; `tag` (the game id) only labels the request log."""
         if not self.available():
-            return []
-        text = self._ask(prompt)
-        return parse_plan(text, available) if text else []
+            return NO_ADVICE
+        text = self._ask(prompt, tag)
+        if not text:
+            return NO_ADVICE
+        return Advice(parse_plan(text, available), parse_theory(text))
 
-    def _ask(self, prompt: str) -> str | None:
+    def _ask(self, prompt: str, tag: str = "") -> str | None:
+        with self._in_flight:  # wait our turn; the timeout below starts when the request is sent
+            return self._send(prompt, tag)
+
+    def _send(self, prompt: str, tag: str) -> str | None:
         started = time.time()
-        body = json.dumps({
+        request_body: dict = {
             "model": self.model,
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
             "max_tokens": self.max_tokens, **self.sampling,
             "chat_template_kwargs": {"enable_thinking": self.thinking},
-        }).encode()
+        }
+        if self.structured:
+            request_body["response_format"] = {"type": "json_schema",
+                                               "json_schema": {"name": "plan", "schema": PLAN_SCHEMA}}
+        body = json.dumps(request_body).encode()
         request = urllib.request.Request(self.url, body, {"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
@@ -98,11 +138,11 @@ class Advisor:
             text = answer["choices"][0]["message"].get("content") or ""
         except Exception as e:
             self._failed()
-            self._log({"seconds": round(time.time() - started, 1), "error": repr(e)[:300]})
+            self._log({"game": tag, "seconds": round(time.time() - started, 1), "error": repr(e)[:300]})
             return None
         with self._lock:
             self._fails_in_a_row = 0
-        self._log({"seconds": round(time.time() - started, 1), "usage": answer.get("usage"),
+        self._log({"game": tag, "seconds": round(time.time() - started, 1), "usage": answer.get("usage"),
                    "finish": answer["choices"][0].get("finish_reason"), "answer": text[-1500:]})
         return text
 
@@ -144,7 +184,18 @@ def advisor() -> Advisor | None:
 # ── the answer ──────────────────────────────────────────────────────────────
 
 
-def parse_plan(text: str, available: list[int]) -> list[tuple]:
+def parse_theory(text: str) -> str:
+    """The "theory" field of the answer, or "" if there is none."""
+    match = re.search(r'"theory"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    if match is None:
+        return ""
+    try:
+        return str(json.loads('"' + match.group(1) + '"'))
+    except ValueError:
+        return match.group(1)
+
+
+def parse_plan(text: str, available: list[int]) -> list[Action]:
     """Actions from the last {"plan": [...]} in the answer; illegal ones are dropped. Never RESET:
     a RESET with no steps taken restarts the whole game, so only the brain may reset."""
     steps = None
@@ -170,84 +221,94 @@ def parse_plan(text: str, available: list[int]) -> list[tuple]:
             x, y = int(m.group(2)), int(m.group(3))
             if not (0 <= x < 64 and 0 <= y < 64):
                 continue
-            plan.append((6, x, y))
+            plan.append(Action(6, x, y))
         else:
-            plan.append((action_id, -1, -1))
+            plan.append(Action(action_id, -1, -1))
     return plan
 
 
 # ── the question ────────────────────────────────────────────────────────────
 
 
-def describe(brain, grid: np.ndarray, available: list[int]) -> str:
-    world = brain.world
-    level_map = world.levels.get(brain.level)
-    parts = [f"Level {brain.level + 1} (levels completed so far: {brain.level}). "
-             f"Actions taken in this life: {brain.life_length}. Lives lost so far: {brain.stats['deaths']}."]
-    budget = world.rules["steps_per_life"].get(brain.level)
-    if budget:
-        parts.append(f"A life on this level seems to last about {budget} actions.")
-    parts.append("Available actions: " + ", ".join(f"ACTION{a}" for a in sorted(available) if a != 0) + ".")
-    parts += _what_actions_do(world, available)
-    colour = world.avatar["colour"]
-    if colour is not None:
-        at = avatar_position(world, hide_counters(world, grid))
-        where = f" (centre near x={at[1] // 4}, y={at[0] // 4})" if at else ""
-        parts.append(f"You probably control the object of colour {colour:x}{where}.")
-    roles = {c: r.most_common(1)[0][0] for c, r in world.colour_roles.items() if r}
-    if roles:
-        parts.append("Touching colours seemed to: " + ", ".join(f"{c:x}={r}" for c, r in sorted(roles.items())) + ".")
-    if world.goals:
-        parts.append("Earlier wins came with: " + "; ".join(_goal_text(g) for g in world.goals[:4]) + ".")
-    if level_map is not None:
-        parts.append(f"Distinct screens seen on this level: {len(level_map.screens)}.")
-    if brain.recent:
-        parts.append("Your most recent steps, oldest first:\n" + "\n".join(f"  {s}" for s in brain.recent))
-    parts.append("Current screen (row number, then 64 hex digits for x=0..63):\n" + render_grid(grid))
-    return "\n".join(parts)
+class PromptWriter:
+    """Writes the question for the advisor from the beliefs and short-term memory (read-only)."""
 
+    def __init__(self, world: World, memory: WorkingMemory, stats: defaultdict[str, int]) -> None:
+        self.world = world
+        self.memory = memory
+        self.stats = stats
 
-def render_grid(grid: np.ndarray) -> str:
-    return "\n".join(f"{y:02d} " + "".join(f"{v:x}" for v in row) for y, row in enumerate(grid.tolist()))
+    def describe(self, grid: np.ndarray, available: list[int]) -> str:
+        world, m = self.world, self.memory
+        level = m.level if m.level is not None else 0
+        level_map = world.levels.get(level)
+        parts = [f"Level {level + 1} (levels completed so far: {level}). "
+                 f"Actions taken in this life: {m.life_length}. Lives lost so far: {self.stats['deaths']}."]
+        budget = world.rules.steps_per_life.get(level)
+        if budget:
+            parts.append(f"A life on this level seems to last about {budget} actions.")
+        parts.append("Available actions: " + ", ".join(f"ACTION{a}" for a in sorted(available) if a != 0) + ".")
+        parts += self._what_actions_do(available)
+        colour = world.avatar.colour
+        if colour is not None:
+            at = world.avatar.position(world.counters.hide(grid))
+            where = f" (centre near x={at[1] // 4}, y={at[0] // 4})" if at else ""
+            parts.append(f"You probably control the object of colour {colour:x}{where}.")
+        roles = {c: r.most_common(1)[0][0] for c, r in world.colour_roles.evidence.items() if r}
+        if roles:
+            parts.append("Touching colours seemed to: "
+                         + ", ".join(f"{c:x}={r.value}" for c, r in sorted(roles.items())) + ".")
+        if world.goals:
+            parts.append("Earlier wins came with: " + "; ".join(self._goal_text(g) for g in world.goals[:4]) + ".")
+        if level_map is not None:
+            parts.append(f"Distinct screens seen on this level: {len(level_map.screens)}.")
+        if m.recent:
+            parts.append("Your most recent steps, oldest first:\n" + "\n".join(f"  {s}" for s in m.recent))
+        parts.append("Current screen (row number, then 64 hex digits for x=0..63):\n" + self.render_grid(grid))
+        return "\n".join(parts)
 
+    @staticmethod
+    def render_grid(grid: np.ndarray) -> str:
+        return "\n".join(f"{y:02d} " + "".join(f"{v:x}" for v in row) for y, row in enumerate(grid.tolist()))
 
-def describe_step(action: tuple, before: np.ndarray | None, after: np.ndarray | None, outcome: str | None) -> str:
-    """One line of history: what an action did."""
-    name = f"ACTION6 {action[1]} {action[2]}" if action[0] == 6 else f"ACTION{action[0]}"
-    if outcome is not None:
-        return f"{name} -> {outcome}"
-    if before is None or after is None:
-        return f"{name} -> ?"
-    changed = (before != after) & (before != 255) & (after != 255)
-    n = int(changed.sum())
-    if n == 0:
-        return f"{name} -> nothing changed"
-    ys, xs = np.nonzero(changed)
-    return f"{name} -> {n} cells changed within x={xs.min()}..{xs.max()}, y={ys.min()}..{ys.max()}"
+    @staticmethod
+    def describe_step(action: Action, before: np.ndarray | None, after: np.ndarray | None,
+                      outcome: str | None) -> str:
+        """One line of history: what an action did."""
+        name = f"ACTION6 {action[1]} {action[2]}" if action[0] == 6 else f"ACTION{action[0]}"
+        if outcome is not None:
+            return f"{name} -> {outcome}"
+        if before is None or after is None:
+            return f"{name} -> ?"
+        changed = (before != after) & (before != 255) & (after != 255)
+        n = int(changed.sum())
+        if n == 0:
+            return f"{name} -> nothing changed"
+        ys, xs = np.nonzero(changed)
+        return f"{name} -> {n} cells changed within x={xs.min()}..{xs.max()}, y={ys.min()}..{ys.max()}"
 
+    def _what_actions_do(self, available: list[int]) -> list[str]:
+        lines = []
+        for a in sorted(available):
+            if a == 0:
+                continue
+            tally = self.world.actions.changed_screen.get(a)
+            if tally is None or tally.tries == 0:
+                continue
+            text = f"ACTION{a}: changed the screen {tally.hits} of {tally.tries} times"
+            steps = self.world.avatar.steps.get(a)
+            if steps:
+                (dy, dx), _ = steps.most_common(1)[0]
+                text += f"; moves your object by dx={dx:+d}, dy={dy:+d}"
+            lines.append(text + ".")
+        return lines
 
-def _what_actions_do(world, available: list[int]) -> list[str]:
-    lines = []
-    for a in sorted(available):
-        if a == 0:
-            continue
-        tally = world.actions["changed_screen"].get(a)
-        if tally is None or tally.tries == 0:
-            continue
-        text = f"ACTION{a}: changed the screen {tally.hits} of {tally.tries} times"
-        steps = world.avatar["steps"].get(a)
-        if steps:
-            (dy, dx), _ = steps.most_common(1)[0]
-            text += f"; moves your object by dx={dx:+d}, dy={dy:+d}"
-        lines.append(text + ".")
-    return lines
-
-
-def _goal_text(goal: dict) -> str:
-    kind, *colours = goal["feature"]
-    change = "more" if goal["direction"] > 0 else "fewer"
-    if kind == "count":
-        return f"{change} cells of colour {colours[0]:x}"
-    if kind == "touch":
-        return f"{change} places where colours {colours[0]:x} and {colours[1]:x} touch"
-    return f"your object touching {change} cells of colour {colours[0]:x}"
+    @staticmethod
+    def _goal_text(goal: Goal) -> str:
+        kind, *colours = goal.feature
+        change = "more" if goal.direction > 0 else "fewer"
+        if kind == "count":
+            return f"{change} cells of colour {colours[0]:x}"
+        if kind == "touch":
+            return f"{change} places where colours {colours[0]:x} and {colours[1]:x} touch"
+        return f"your object touching {change} cells of colour {colours[0]:x}"

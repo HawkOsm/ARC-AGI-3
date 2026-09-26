@@ -45,7 +45,7 @@ def masked_lines(game: str) -> tuple[list[int], list[int]]:
     a.MAX_ACTIONS = ACTIONS
     a.main()
     arc.close_scorecard(card)
-    m = a.brain.world.counters["ignore"]
+    m = a.brain.world.counters.ignore
     return np.flatnonzero(m.all(axis=1)).tolist(), np.flatnonzero(m.all(axis=0)).tolist()
 
 

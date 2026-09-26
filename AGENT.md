@@ -124,44 +124,63 @@ not assumed. Re-verify after any version change.
 
 ## Architecture (agent/brain/)
 
-The idea: **fixed, game-agnostic functions + a `World` of beliefs that starts almost empty
-and fills up as the agent plays.** Code never changes per game; only the beliefs do.
+The idea: **fixed, game-agnostic code + a `World` of beliefs that starts almost empty and fills
+up as the agent plays.** Code never changes per game; only the beliefs do. Map for newcomers:
+docs/ARCHITECTURE.md.
 
 ```
 agent/brain/
-  settings.py      every tunable number, with why it matters
-  world.py         WORLD  - the beliefs (what the agent knows about this game)
-  look.py          LOOK   - reading the screen: settled picture, objects, changed blobs, and
-                            first_look (a level's inventory: item kinds with purpose "?", patterns)
-  goals.py         GOALS  - decided by the game: features that changed when levels were won
-  learn.py         LEARN  - functions that write beliefs into the world from what was seen
-  decide.py        DECIDE - functions that read the beliefs and pick the next action
-  llm.py           ASK    - optional LLM advisor (local vLLM server); brain falls back when it fails
-  brain.py         BRAIN  - the loop: look -> events -> learn -> decide  (read this first)
+  settings.py      every tunable number, with why it matters (constants)
+  world.py         MODEL   - typed belief classes + read-only queries: World, CounterMemory, AvatarBelief,
+                             ColourRoles, Kind, Pattern, Item, ActionBeliefs, Rules, Goal, Death, Screen,
+                             LevelMemory, Tally, WorkingMemory; enums Outcome, Role; records Action, ClickInfo
+  look.py          READER  - ScreenReader (static: settled picture, objects -> Blob, changed blobs, shapes),
+                             FirstLook (a level's inventory: item kinds with purpose "?", patterns)
+  learn.py         LEARNERS- the only writers of beliefs: CounterLearner, AvatarLearner, TouchLearner,
+                             ActionLearner, DeathJudge
+  goals.py         GOALS   - ScreenFeatures (static), GoalTracker (goals from wins, progress toward them)
+  decide.py        DECIDER - Explorer: reads beliefs, picks the next action
+  llm.py           ADVISOR - Advisor (HTTP client to a local vLLM server), PromptWriter, parse_plan
+  brain.py         ORCHESTRATOR - Brain: look -> events -> learn -> decide (read this first)
   kaggle_agent.py  MyAgent: plugs the Brain into Kaggle's framework, with all the hardening
 agent/my_agent.py  generated single file that ships (make build) - never edit by hand
 ```
+
+### Code style: Python written like Java (owner, 2026-09-26)
+
+- **Typed classes, not dicts.** Beliefs are classes with named, annotated fields (`@dataclass(slots=True)`
+  for plain records, a normal class when it has behaviour). No `thing["field"]` for our own data.
+- **Enums for fixed sets** (`Outcome`, `Role`, later game modes / object classes), never magic strings.
+- **Records for small immutable values** (`Action`, `ClickInfo` are `NamedTuple`s: equal to plain tuples).
+- **One job per class, explicit dependencies** passed to the constructor (`Explorer(world, memory, goals,
+  rng, stats, restart)`), no reaching into another object's internals.
+- **Model vs services:** `world.py` holds data + read-only queries; learners are the only writers;
+  deciders only read beliefs (and write short-term memory).
+- **Static utility classes** for pure helpers (`ScreenReader`, `ScreenFeatures`).
+- **mypy is the compiler:** `make check` runs it on agent/brain (config in pyproject.toml); keep it clean.
+- Only the standard library + numpy in agent/brain (Kaggle ships nothing else we can rely on); no pydantic
+  or other frameworks in the per-action path.
 
 The beliefs (`world.py`):
 
 | belief | holds | written by | kept across levels |
 |---|---|---|---|
-| `world.counters` | which pixels are HUD step-counters (ignored when comparing screens) | `learn.update_counters` | yes |
-| `world.avatar` | which colour is the player (moves differently per key), its extra "part" colours, how far each key moves it | `learn.update_avatar`, `learn.learn_what_touching_does` | yes |
-| `world.kinds` | every distinct item type (colour + exact shape) seen at a first look, purpose "?" until learned | `look.first_look` | yes |
-| `world.colour_roles` | what touching each colour did: floor / wall / hazard / goal / pushable / collectible (a belief; using it to predict wall bumps measured harmful and was removed) | `learn.learn_what_touching_does` | yes |
-| `world.patterns` | first-look observations: repeated kinds, one shape in several colours | `look.first_look` | yes |
-| `world.actions` | per action: changes the screen? undo? reverses another? no-op / deadly at a position? | `learn.record_action_result` | yes |
-| `world.rules` | steps per life | `learn.is_timeout_death` | yes |
-| `world.levels[n]` | the first-look inventory (`items`) and the map: every screen seen and what each action did on it | `look.first_look`, `Brain._record_move` | per level |
-| `world.goals` | what finishes a level, as the game showed it: feature changes (colour counts, colour-colour touches, what the avatar touches) between a level's first screen and its winning screen; confirmed or contradicted by every later win | `goals.learn_goals_from_win`, `goals.goals_from_first_look` (weak cues) | yes |
+| `world.counters` | which pixels are HUD step-counters (ignored when comparing screens) | `learn.CounterLearner` | yes |
+| `world.avatar` | which colour is the player (moves differently per key), its extra "part" colours, how far each key moves it | `learn.AvatarLearner`, `learn.TouchLearner` | yes |
+| `world.kinds` | every distinct item type (colour + exact shape) seen at a first look, purpose "?" until learned | `look.FirstLook` | yes |
+| `world.colour_roles` | what touching each colour did: floor / wall / hazard / goal / pushable / collectible (a belief; using it to predict wall bumps measured harmful and was removed) | `learn.TouchLearner` | yes |
+| `world.patterns` | first-look observations: repeated kinds, one shape in several colours | `look.FirstLook` | yes |
+| `world.actions` | per action: changes the screen? undo? reverses another? no-op / deadly at a position? | `learn.ActionLearner` | yes |
+| `world.rules` | steps per life | `learn.DeathJudge` | yes |
+| `world.levels[n]` | the first-look inventory (`items`) and the map: every screen seen and what each action did on it | `look.FirstLook`, `Brain._record_move` | per level |
+| `world.goals` | what finishes a level, as the game showed it: feature changes (colour counts, colour-colour touches, what the avatar touches) between a level's first screen and its winning screen; confirmed or contradicted by every later win | `goals.GoalTracker` (from wins; weak first-look cues) | yes |
 | `world.deaths` | real deaths, re-judged as timeouts when a budget appears | `Brain._on_death` | — |
 
 One step (`Brain.next_action`):
 1. **LOOK** — the settled picture (last animation layer).
 2. **EVENTS** — game over → blame the last action (unless it was a timeout) and RESET; level
    up → record LEVEL_UP, start a new level map. The level change is the only real reward.
-3. **LEARN** — first screen of a level → `first_look` inventory. Then grow the counter mask (re-identify all screens if it grew), update the avatar,
+3. **LEARN** — first screen of a level → `FirstLook` inventory. Then grow the counter mask (re-identify all screens if it grew), update the avatar,
    identify this screen, record `last screen + last action → this screen`, update action
    beliefs, learn what touching each colour did (one wall bump teaches every cell of that colour). A planned route whose next screen isn't what we got is dropped (never trust a plan
    the world disagrees with).
@@ -207,7 +226,7 @@ of the 25 public games scroll in 300 random moves each; the engine supports came
   exploration each time the mask grows.
 - Click grids inside big objects + whole-screen click grids on exhausted screens — object-centre
   clicks alone stall on games whose clickable unit is part of an object (ft09, lp85).
-- Timeout deaths are not blamed on the last action (`learn.is_timeout_death`) — otherwise legal
+- Timeout deaths are not blamed on the last action (`learn.DeathJudge`) — otherwise legal
   moves get blacklisted as deadly (sp80: 44/44 "deaths" were timeouts).
 - Memory: compact `(prior, colour)` candidate info, capped 1-pixel scans, `MEM_GUARD_*` — all games
   share one Kaggle process and an out-of-memory kill zeroes the whole submission.
