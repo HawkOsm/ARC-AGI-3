@@ -115,6 +115,12 @@ LLM_SAMPLING_THINKING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presen
 # local 4B model spent 3/3 answers' 1,024 tokens reasoning in prose and never reached the plan.
 LLM_STRUCTURED_OUTPUT = True
 LLM_PLAN_MAX = 8  # actions taken from one answer before asking again
+# "drive": the LLM answers with a plan of actions (measured worse than the brain, Kaggle v5).
+# "hypothesis": the brain asks about OBJECTS (what is controlled, what is the goal, roles) and runs the LLM's one
+# test action per question to check its prediction; every other action is the brain's. ARC3_LLM_MODE overrides.
+LLM_MODE = "drive"
+LLM_ASK_EVERY = 4  # hypothesis mode: brain actions between questions (evidence for the next one)
+LLM_HISTORY = 6  # hypothesis mode: earlier explanations + test verdicts shown to the model
 LLM_RECENT_STEPS = 16  # recent steps (action -> what happened) shown to the model
 # At most this many requests are in flight; other games wait on our side, so the timeout measures the
 # server's work, not its queue (all games ask at once at the start; the local 8 GB card's cache holds ~9

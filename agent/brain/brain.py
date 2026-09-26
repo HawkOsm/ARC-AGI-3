@@ -13,6 +13,7 @@ and the route being followed - lives in `self.memory` (world.WorkingMemory).
 """
 from __future__ import annotations
 
+import os
 import random
 from collections import defaultdict, deque
 
@@ -21,9 +22,10 @@ import numpy as np
 from .decide import Explorer
 from .goals import GoalTracker, ScreenFeatures
 from .learn import ActionLearner, AvatarLearner, CounterLearner, DeathJudge, TouchLearner
-from .llm import PromptWriter, advisor
+from .llm import Lab, PromptWriter, advisor
 from .look import FirstLook, ScreenReader
-from .settings import LLM_RECENT_STEPS
+from .scene import RelationFinder, SceneTracker
+from .settings import LLM_ASK_EVERY, LLM_MODE, LLM_RECENT_STEPS
 from .trace import Tracer
 from .world import (
     DIED,
@@ -60,6 +62,11 @@ class Brain:
         self.explorer = Explorer(self.world, self.memory, self.goals, self.rng, self.stats, self.restart_level)
         self.prompt = PromptWriter(self.world, self.memory, self.stats)
         self.tracer = Tracer.for_game(name)  # None unless ARC3_TRACE_DIR is set
+        # hypothesis mode (ARC3_LLM_MODE=hypothesis): objects on screen + experiments the LLM proposes
+        self.mode = os.environ.get("ARC3_LLM_MODE", LLM_MODE)
+        self.scene = SceneTracker(self.world) if self.mode == "hypothesis" else None
+        self.lab = Lab()
+        self._traced_verdicts = 0
 
     # ── public ──────────────────────────────────────────────────────────────
 
@@ -68,8 +75,11 @@ class Brain:
         """The whole agent: given the latest frame, return (action_id, x, y)."""
         action = self._think(state, frame_layers, levels_completed, available, full_reset)
         if self.tracer is not None:
+            verdicts = self.lab.verdicts
+            check = self.lab.last_verdict if verdicts != self._traced_verdicts else ""
+            self._traced_verdicts = verdicts
             self.tracer.record(state, ScreenReader.settled_grid(frame_layers), action, self.world, self.memory,
-                               self.stats)
+                               self.stats, check)
         self.stats["actions"] += 1
         self.memory.life_length = 0 if action == RESET_ACTION else self.memory.life_length + 1
         return action
@@ -142,9 +152,11 @@ class Brain:
             self.stats["route_mismatches"] += 1  # never trust a plan the world disagrees with
             m.route = []
         self._note_last_step(grid, screen_id)
+        self._watch_scene(grid)
 
         # 4. DECIDE
-        action = self._advice(level_map, grid, available)
+        action = self._experiment(level_map, grid, available) if self.scene is not None \
+            else self._advice(level_map, grid, available)
         m.last_from_advisor = action is not None
         if action is None:
             action = self.explorer.choose(level_map, screen, available)
@@ -168,6 +180,42 @@ class Brain:
         if m.last_from_advisor and screen_id == m.last_screen_id and m.plan:
             self.stats["llm_plans_dropped"] += 1  # the plan expected something; nothing happened
             m.plan = []
+
+    def _watch_scene(self, grid: np.ndarray) -> None:
+        """Hypothesis mode: track the objects; if the last action was the LLM's test, check its prediction."""
+        m = self.memory
+        if self.scene is None or m.level is None:
+            return
+        last = m.last_action if m.last_action != RESET_ACTION else None
+        observation = self.scene.update(m.level, grid, last)
+        pending = self.lab.pending
+        if pending is not None and observation is not None and observation.action == pending.test_action:
+            verdict = Lab.check(pending, observation)
+            self.stats["llm_tests_correct" if verdict.startswith("CORRECT") else "llm_tests_wrong"] += 1
+            self.lab.record(verdict)
+
+    def _experiment(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
+        """Hypothesis mode: every LLM_ASK_EVERY brain actions, ask the object question and run its test action."""
+        m = self.memory
+        adviser = advisor()
+        if adviser is None or self.scene is None or m.level is None or level_map.has_solution \
+                or self.lab.pending is not None or self.stats["actions"] < self.lab.next_ask_at:
+            return None
+        scene = self.scene.scene(m.level)
+        wholes = [o for o in scene.objects if scene.root(o.id) == o.id]
+        question = self.prompt.object_question(scene, RelationFinder.find(wholes, *grid.shape),
+                                               list(scene.observations)[-12:], self.lab.history, available)
+        self.stats["llm_questions"] += 1
+        hypothesis = adviser.hypothesise(question, available, tag=self.name)
+        self.lab.next_ask_at = self.stats["actions"] + LLM_ASK_EVERY
+        if hypothesis is None or hypothesis.test_action is None:
+            return None
+        self.lab.latest = self.lab.pending = hypothesis
+        m.theory = f"{hypothesis.rule} | goal: {hypothesis.goal} | controlled: {hypothesis.controlled}"
+        m.why = f"LLM test: expects {hypothesis.prediction()}"
+        m.route, m.expected_screen = [], None
+        self.stats["llm_actions"] += 1
+        return hypothesis.test_action
 
     def _advice(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
         """The advisor's next action, or None (advisor off, level already solved, no usable answer)."""
@@ -261,6 +309,8 @@ class Brain:
     def _on_death(self) -> None:
         m, world = self.memory, self.world
         self.stats["deaths"] += 1
+        if self.lab.pending is not None:
+            self.lab.record("the test action LOST A LIFE")
         m.plan = []
         if m.last_action not in (None, RESET_ACTION):
             assert m.last_action is not None
@@ -285,6 +335,8 @@ class Brain:
     def _on_level_up(self, new_level: int) -> None:
         m, world = self.memory, self.world
         self.stats["level_ups"] += 1
+        if self.lab.pending is not None:
+            self.lab.record("the test action FINISHED THE LEVEL")
         m.plan = []
         if m.last_action not in (None, RESET_ACTION):
             assert m.last_action is not None

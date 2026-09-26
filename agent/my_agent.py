@@ -11,6 +11,7 @@ from collections import Counter
 from collections import Counter, deque
 from collections import defaultdict
 from collections import defaultdict, deque
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import dataclass, field
@@ -96,6 +97,9 @@ LLM_SAMPLING = {'temperature': 0.7, 'top_p': 0.8, 'top_k': 20, 'presence_penalty
 LLM_SAMPLING_THINKING = {'temperature': 1.0, 'top_p': 0.95, 'top_k': 20, 'presence_penalty': 0.0}
 LLM_STRUCTURED_OUTPUT = True
 LLM_PLAN_MAX = 8
+LLM_MODE = 'drive'
+LLM_ASK_EVERY = 4
+LLM_HISTORY = 6
 LLM_RECENT_STEPS = 16
 LLM_MAX_CONCURRENT = 32
 LLM_FAILS_BEFORE_PAUSE = 3
@@ -1276,11 +1280,395 @@ class Explorer:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# agent/brain/scene.py
+# ──────────────────────────────────────────────────────────────────────────
+
+COMPOSITE_MIN_MOVES = 2
+COLOUR_NAMES = ['white', 'light grey', 'grey', 'dark grey', 'darker grey', 'black', 'magenta', 'pink', 'red', 'blue', 'light blue', 'yellow', 'orange', 'maroon', 'green', 'purple']
+
+@dataclass(slots=True)
+class SceneObject:
+    id: int
+    colour: int
+    size: int
+    bbox: tuple[int, int, int, int]
+    shape: tuple
+    background: bool = False
+
+    @property
+    def top_left(self) -> tuple[int, int]:
+        return (self.bbox[0], self.bbox[1])
+
+    def describe(self) -> str:
+        y0, x0, y1, x1 = self.bbox
+        where = f'x{x0}-{x1} y{y0}-{y1}' if (x0, y0) != (x1, y1) else f'x{x0} y{y0}'
+        size = f'{x1 - x0 + 1}x{y1 - y0 + 1}'
+        return f'#{self.id} {COLOUR_NAMES[self.colour]}, {self.size} cells, {size} box at {where}' + (' (background)' if self.background else '')
+
+@dataclass(slots=True)
+class Change:
+    object_id: int
+    kind: str
+    dx: int = 0
+    dy: int = 0
+    note: str = ''
+
+    def describe(self) -> str:
+        if self.kind == 'moved':
+            parts = []
+            if self.dx:
+                parts.append(f"{('right' if self.dx > 0 else 'left')} {abs(self.dx)}")
+            if self.dy:
+                parts.append(f"{('down' if self.dy > 0 else 'up')} {abs(self.dy)}")
+            return f"#{self.object_id} moved {' and '.join(parts)}"
+        return f"#{self.object_id} {self.kind}{(' ' + self.note if self.note else '')}"
+
+@dataclass(slots=True)
+class Observation:
+    """One action and what it did to the objects."""
+    action: Action
+    changes: list[Change]
+    clicked: int | None = None
+
+    def describe(self) -> str:
+        a = self.action
+        name = f'ACTION6 at x{a[1]} y{a[2]}' + (f' (on #{self.clicked})' if self.clicked is not None else '') if a[0] == 6 else f'ACTION{a[0]}'
+        return f'{name}: {self.effects()}'
+
+    def effects(self) -> str:
+        """The changes, with objects that moved the same way grouped: "#7 #8 #9 moved right 3"."""
+        if not self.changes:
+            return 'no object changed'
+        groups: dict[tuple, list[int]] = {}
+        for c in self.changes:
+            groups.setdefault((c.kind, c.dx, c.dy, c.note), []).append(c.object_id)
+        parts = []
+        for (kind, dx, dy, note), ids in groups.items():
+            text = Change(ids[0], kind, dx, dy, note).describe()
+            parts.append(' '.join((f'#{i}' for i in ids)) + text[len(f'#{ids[0]}'):])
+        return ', '.join(parts)
+
+@dataclass(slots=True)
+class LevelScene:
+    objects: list[SceneObject] = field(default_factory=list)
+    next_id: int = 0
+    observations: deque = field(default_factory=lambda: deque(maxlen=40))
+    parent: dict[int, int] = field(default_factory=dict)
+    together: dict[tuple[int, int], int] = field(default_factory=dict)
+    apart: dict[tuple[int, int], int] = field(default_factory=dict)
+
+    def root(self, object_id: int) -> int:
+        """The id that stands for the whole composite object (the smallest id of the group)."""
+        while self.parent.get(object_id, object_id) != object_id:
+            object_id = self.parent[object_id]
+        return object_id
+
+    def join(self, a: int, b: int) -> None:
+        ra, rb = (self.root(a), self.root(b))
+        if ra != rb:
+            self.parent[max(ra, rb)] = min(ra, rb)
+
+    def rebuild_composites(self) -> None:
+        """Parts of one object: moved by the same step, touching, at least twice, and never apart."""
+        self.parent = {}
+        for (a, b), n in self.together.items():
+            if n >= COMPOSITE_MIN_MOVES and (not self.apart.get((a, b))):
+                self.join(a, b)
+
+    def members(self, root: int) -> list[int]:
+        ids = {o.id for o in self.objects} | set(self.parent)
+        return sorted((i for i in ids if i != root and self.root(i) == root))
+
+class SceneTracker:
+    """Numbers the objects of a level and records what each action did to them (writes only its own state)."""
+
+    def __init__(self, world: World) -> None:
+        self.world = world
+        self.levels: dict[int, LevelScene] = {}
+
+    def scene(self, level: int) -> LevelScene:
+        return self.levels.setdefault(level, LevelScene())
+
+    def objects_in(self, grid: np.ndarray) -> list[SceneObject]:
+        """Objects on this screen (counter pixels hidden), largest first; ids not assigned yet (-1)."""
+        picture = self.world.counters.hide(grid)
+        visible = ~self.world.counters.ignore
+        objs = []
+        for blob in ScreenReader.find_objects(picture, visible=visible):
+            objs.append(SceneObject(-1, blob.colour, blob.size, blob.bbox, ScreenReader.shape_of(blob), background=blob.size > BACKGROUND_FRACTION * grid.size))
+        objs.sort(key=lambda o: (-o.size, o.bbox))
+        return objs
+
+    def update(self, level: int, grid: np.ndarray, last_action: Action | None) -> Observation | None:
+        """Match this screen's objects to the level's known ones; returns what `last_action` changed."""
+        scene = self.scene(level)
+        now = self.objects_in(grid)
+        before = scene.objects
+        if not before:
+            for obj in now:
+                obj.id = scene.next_id
+                scene.next_id += 1
+            scene.objects = now
+            return None
+        changes = self._match(scene, before, now)
+        scene.objects = now
+        if last_action is None or last_action[0] == 0:
+            return None
+        self._join_moving_together(scene, changes)
+        changes = self._as_composites(scene, changes)
+        clicked = self._object_at(before, last_action) if last_action[0] == 6 else None
+        if clicked is not None:
+            clicked = scene.root(clicked)
+        observation = Observation(last_action, changes, clicked)
+        scene.observations.append(observation)
+        return observation
+
+    def _match(self, scene: LevelScene, before: list[SceneObject], now: list[SceneObject]) -> list[Change]:
+        """Give every object on the new screen its id, and list what changed."""
+        changes: list[Change] = []
+        used_now, used_before = self._pair_same_objects(before, now, changes)
+        unmatched_before = [b for j, b in enumerate(before) if j not in used_before]
+        reshaped: set[int] = set()
+        for obj in (o for i, o in enumerate(now) if i not in used_now):
+            self._match_changed(scene, obj, unmatched_before, changes, reshaped)
+        for prev in unmatched_before:
+            if not prev.background and prev.id not in reshaped:
+                changes.append(Change(prev.id, 'disappeared'))
+        return changes
+
+    @staticmethod
+    def _join_moving_together(scene: LevelScene, changes: list[Change]) -> None:
+        """Count, for touching objects, how often they moved by the same step and how often not (one moved, the
+        other stood still or went elsewhere). Objects split into pieces (partly covered) never count as moving."""
+        pieces: dict[int, int] = {}
+        for o in scene.objects:
+            pieces[o.id] = pieces.get(o.id, 0) + 1
+        whole = {o.id: o for o in scene.objects if pieces[o.id] == 1 and (not o.background)}
+        step = {c.object_id: (c.dx, c.dy) for c in changes if c.kind == 'moved' and c.object_id in whole}
+        if not step:
+            return
+        ids = sorted(whole)
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                if a not in step and b not in step or not _touch(whole[a].bbox, whole[b].bbox):
+                    continue
+                pair = (a, b)
+                if step.get(a) == step.get(b):
+                    scene.together[pair] = scene.together.get(pair, 0) + 1
+                else:
+                    scene.apart[pair] = scene.apart.get(pair, 0) + 1
+        scene.rebuild_composites()
+
+    @staticmethod
+    def _as_composites(scene: LevelScene, changes: list[Change]) -> list[Change]:
+        """Report each composite object once, under its root id."""
+        out: list[Change] = []
+        seen: set[tuple] = set()
+        for c in changes:
+            key = (scene.root(c.object_id), c.kind, c.dx, c.dy)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(Change(key[0], c.kind, c.dx, c.dy, c.note))
+        return out
+
+    @staticmethod
+    def _pair_same_objects(before: list[SceneObject], now: list[SceneObject], changes: list[Change]) -> tuple[set[int], set[int]]:
+        """Same colour + shape = same object. Identical twins move together more often than not: within each
+        group, pairs following the group's most common displacement are matched first (five dots that all moved
+        down 3 pair with themselves even where one lands on another's old spot), then the nearest remaining."""
+        groups: dict[tuple, tuple[list[int], list[int]]] = {}
+        for i, obj in enumerate(now):
+            groups.setdefault((obj.colour, obj.shape), ([], []))[0].append(i)
+        for j, prev in enumerate(before):
+            if (prev.colour, prev.shape) in groups:
+                groups[prev.colour, prev.shape][1].append(j)
+        pairs = []
+        for now_ids, before_ids in groups.values():
+            deltas = [((now[i].bbox[0] - before[j].bbox[0], now[i].bbox[1] - before[j].bbox[1]), i, j) for i in now_ids for j in before_ids]
+            counts: dict[tuple[int, int], int] = {}
+            for d, _i, _j in deltas:
+                counts[d] = counts.get(d, 0) + 1
+            common = max(counts, key=lambda d: (counts[d], -abs(d[0]) - abs(d[1]))) if counts else (0, 0)
+            pairs += [(d != common, abs(d[0]) + abs(d[1]), i, j) for d, i, j in deltas]
+        pairs.sort()
+        used_now: set[int] = set()
+        used_before: set[int] = set()
+        for _not_common, _dist, i, j in pairs:
+            if i in used_now or j in used_before:
+                continue
+            used_now.add(i)
+            used_before.add(j)
+            obj, prev = (now[i], before[j])
+            obj.id = prev.id
+            dy, dx = (obj.bbox[0] - prev.bbox[0], obj.bbox[1] - prev.bbox[1])
+            if (dx or dy) and (not obj.background):
+                changes.append(Change(obj.id, 'moved', dx, dy))
+        return (used_now, used_before)
+
+    @staticmethod
+    def _match_changed(scene: LevelScene, obj: SceneObject, unmatched_before: list[SceneObject], changes: list[Change], reshaped: set[int]) -> None:
+        """An object with no identical partner: recoloured in place, a background region that changed shape,
+        the same object partly covered or split into pieces (same colour, overlapping its old place), or new."""
+        recoloured = next((b for b in unmatched_before if b.bbox == obj.bbox and b.colour != obj.colour), None)
+        if recoloured is not None:
+            unmatched_before.remove(recoloured)
+            obj.id = recoloured.id
+            if not obj.background:
+                changes.append(Change(obj.id, 'recoloured', note=f'{COLOUR_NAMES[recoloured.colour]} -> {COLOUR_NAMES[obj.colour]}'))
+            return
+        region = next((b for b in unmatched_before if b.background and obj.background and (b.colour == obj.colour)), None)
+        if region is not None:
+            unmatched_before.remove(region)
+            obj.id = region.id
+            return
+        old = [b for b in unmatched_before + [b for b in scene.objects if b.id in reshaped] if b.colour == obj.colour and (not b.background) and _touch(b.bbox, obj.bbox, margin=4)]
+        if old:
+            obj.id = max(old, key=lambda b: _overlap(b.bbox, obj.bbox)).id
+            if obj.id not in reshaped:
+                reshaped.add(obj.id)
+                changes.append(Change(obj.id, 'reshaped', note='(partly covered, cut or grown)'))
+            return
+        obj.id = scene.next_id
+        scene.next_id += 1
+        if not obj.background:
+            changes.append(Change(obj.id, 'appeared', note=f'({obj.describe()})'))
+
+    @staticmethod
+    def _object_at(objects: list[SceneObject], action: Action) -> int | None:
+        x, y = (action[1], action[2])
+        hits = [o for o in objects if o.bbox[1] <= x <= o.bbox[3] and o.bbox[0] <= y <= o.bbox[2]]
+        return min(hits, key=lambda o: o.size).id if hits else None
+
+def _touch(a: tuple[int, int, int, int], b: tuple[int, int, int, int], margin: int=1) -> bool:
+    """Boxes (y0, x0, y1, x1) overlap or come within `margin` cells of each other."""
+    return a[0] <= b[2] + margin and b[0] <= a[2] + margin and (a[1] <= b[3] + margin) and (b[1] <= a[3] + margin)
+
+def _overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> int:
+    h = min(a[2], b[2]) - max(a[0], b[0]) + 1
+    w = min(a[3], b[3]) - max(a[1], b[1]) + 1
+    return max(0, h) * max(0, w)
+
+class RelationFinder:
+    """Relations between objects the brain can compute itself (utility class)."""
+
+    @staticmethod
+    def find(objects: list[SceneObject], height: int, width: int) -> list[str]:
+        facts: list[str] = []
+        things = [o for o in objects if not o.background and o.size > 1]
+        axes = [o for o in objects if RelationFinder._is_vertical_line(o, height) or RelationFinder._is_horizontal_line(o, width)]
+        for axis in axes:
+            for a in things:
+                if a is axis:
+                    continue
+                for b in things:
+                    if b is axis or b.id <= a.id or (not RelationFinder._mirrored(a, b, axis, height)):
+                        continue
+                    facts.append(f'#{b.id} is where #{a.id} would be if mirrored across #{axis.id}')
+        for i, a in enumerate(things):
+            for b in things[i + 1:]:
+                ha, wa = (a.bbox[2] - a.bbox[0], a.bbox[3] - a.bbox[1])
+                hb, wb = (b.bbox[2] - b.bbox[0], b.bbox[3] - b.bbox[1])
+                if a.colour != b.colour and a.size == b.size and ((ha, wa) == (hb, wb)):
+                    same = 'same shape' if a.shape == b.shape else 'same size and box, different shape'
+                    facts.append(f'#{a.id} and #{b.id}: {same}, different colours')
+        return facts[:12]
+
+    @staticmethod
+    def _is_vertical_line(o: SceneObject, height: int) -> bool:
+        y0, x0, y1, x1 = o.bbox
+        return x1 - x0 <= 3 and y1 - y0 + 1 >= 0.8 * height and (o.size >= 0.8 * (x1 - x0 + 1) * (y1 - y0 + 1))
+
+    @staticmethod
+    def _is_horizontal_line(o: SceneObject, width: int) -> bool:
+        y0, x0, y1, x1 = o.bbox
+        return y1 - y0 <= 3 and x1 - x0 + 1 >= 0.8 * width and (o.size >= 0.8 * (x1 - x0 + 1) * (y1 - y0 + 1))
+
+    @staticmethod
+    def _mirrored(a: SceneObject, b: SceneObject, axis: SceneObject, height: int) -> bool:
+        ay0, ax0, ay1, ax1 = axis.bbox
+        y0, x0, y1, x1 = a.bbox
+        by0, bx0, by1, bx1 = b.bbox
+        if RelationFinder._is_vertical_line(axis, height):
+            twice = ax0 + ax1
+            return abs(by0 - y0) <= 1 and abs(by1 - y1) <= 1 and (abs(bx0 - (twice - x1)) <= 1) and (abs(bx1 - (twice - x0)) <= 1)
+        twice = ay0 + ay1
+        return abs(bx0 - x0) <= 1 and abs(bx1 - x1) <= 1 and (abs(by0 - (twice - y1)) <= 1) and (abs(by1 - (twice - y0)) <= 1)
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # agent/brain/llm.py
 # ──────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = 'You are playing an unknown turn-based puzzle game on a 64x64 grid. Nobody tells you the rules or the goal: you find them out by acting and watching what changes.\n\n- Each cell holds a colour 0-15, written as one hex digit 0-f. Row y goes top (0) to bottom (63), column x left (0) to right (63).\n- ACTION1..ACTION5 are simple inputs (often ACTION1=up, ACTION2=down, ACTION3=left, ACTION4=right, ACTION5=use/select, but check the evidence). ACTION6 x y clicks cell (x, y). ACTION7 is usually undo. Only the listed available actions can be used.\n- A level is won by reaching some goal state; the game then shows the next level. Many games have a step counter or lives shown on screen; running out loses the life and restarts the level.\n- Every action counts against you, including ones that change nothing: finish each level in as FEW actions as possible.\n\nAnswer with exactly one JSON object and nothing else:\n{"theory": "<one or two sentences: what the game is and what you are trying>", "plan": ["ACTION4", "ACTION4", "ACTION6 12 30"]}\nThe plan holds 1 to 8 actions to take next, in order.'
 PLAN_SCHEMA = {'type': 'object', 'properties': {'theory': {'type': 'string', 'maxLength': 400}, 'plan': {'type': 'array', 'minItems': 1, 'maxItems': LLM_PLAN_MAX, 'items': {'type': 'string', 'pattern': '^ACTION[1-7]( [0-9]{1,2} [0-9]{1,2})?$'}}}, 'required': ['theory', 'plan'], 'additionalProperties': False}
+OBJECT_SYSTEM_PROMPT = 'You help an agent play an unknown turn-based puzzle game on a 64x64 grid. Nobody knows the rules or the goal. The agent\'s eyes have split the screen into numbered objects (ids stay the same during a level), noticed some relations between them, and recorded exactly what each action did to which object. Your job is to explain the game in terms of these objects and to propose ONE experiment that tests your explanation.\n\n- ACTION1..ACTION5 are simple inputs (often up, down, left, right, use), ACTION6 x y clicks a cell, ACTION7 is often undo. Only the listed actions exist in this game.\n- Every action counts against the player, so the experiment must be informative.\n- Base every claim on the evidence given. If an earlier prediction of yours was wrong, change your explanation.\n\nAnswer with exactly one JSON object:\n{"rule": "<how the game works, in terms of object ids>", "controlled": [ids you believe the player moves], "goal": "<what must become true to finish the level, in object ids, e.g. #4 covers #5>", "roles": [{"id": 4, "role": "player"}, ...], "test": {"action": "ACTION4", "object": 4, "change": "moved", "direction": "left"}}\ntest.change is what you expect to happen to test.object: moved (give the direction), appeared, disappeared, recoloured, or nothing.'
+ROLES = ['player', 'goal', 'mirror-copy', 'mirror-line', 'wall', 'floor', 'pushable', 'collectible', 'hazard', 'switch', 'indicator', 'background', 'decoration', 'unknown']
+OBJECT_SCHEMA = {'type': 'object', 'properties': {'rule': {'type': 'string', 'maxLength': 400}, 'controlled': {'type': 'array', 'maxItems': 8, 'items': {'type': 'integer'}}, 'goal': {'type': 'string', 'maxLength': 250}, 'roles': {'type': 'array', 'maxItems': 16, 'items': {'type': 'object', 'properties': {'id': {'type': 'integer'}, 'role': {'type': 'string', 'enum': ROLES}}, 'required': ['id', 'role'], 'additionalProperties': False}}, 'test': {'type': 'object', 'properties': {'action': {'type': 'string', 'pattern': '^ACTION[1-7]( [0-9]{1,2} [0-9]{1,2})?$'}, 'object': {'type': 'integer'}, 'change': {'type': 'string', 'enum': ['moved', 'appeared', 'disappeared', 'recoloured', 'nothing']}, 'direction': {'type': 'string', 'enum': ['up', 'down', 'left', 'right', 'none']}}, 'required': ['action', 'object', 'change', 'direction'], 'additionalProperties': False}}, 'required': ['rule', 'controlled', 'goal', 'roles', 'test'], 'additionalProperties': False}
+
+class Hypothesis(NamedTuple):
+    """The advisor's explanation of the game in terms of scene object ids, plus one experiment."""
+    rule: str
+    controlled: list[int]
+    goal: str
+    roles: dict[int, str]
+    test_action: Action | None
+    test_object: int
+    test_change: str
+    test_direction: str
+
+    def prediction(self) -> str:
+        if self.test_change == 'nothing':
+            return 'nothing changes'
+        return f'#{self.test_object} {self.test_change}' + (f' {self.test_direction}' if self.test_change == 'moved' and self.test_direction != 'none' else '')
+
+def parse_hypothesis(text: str, available: list[int]) -> Hypothesis | None:
+    try:
+        data = json.loads(text[text.index('{'):text.rindex('}') + 1])
+        test = data['test']
+        tests = parse_plan(json.dumps({'plan': [test['action']]}), available)
+        return Hypothesis(str(data['rule']), [int(i) for i in data['controlled']], str(data['goal']), {int(r['id']): str(r['role']) for r in data['roles']}, tests[0] if tests else None, int(test['object']), str(test['change']), str(test['direction']))
+    except (ValueError, KeyError, TypeError):
+        return None
+
+class Lab:
+    """Hypothesis mode's notebook: the explanation being tested, and how earlier tests turned out."""
+
+    def __init__(self) -> None:
+        self.pending: Hypothesis | None = None
+        self.latest: Hypothesis | None = None
+        self.history: list[str] = []
+        self.last_verdict = ''
+        self.verdicts = 0
+        self.next_ask_at = 0
+
+    def record(self, verdict: str) -> None:
+        h = self.pending
+        if h is None:
+            return
+        name = f'ACTION6 {h.test_action[1]} {h.test_action[2]}' if h.test_action and h.test_action[0] == 6 else f'ACTION{h.test_action[0]}' if h.test_action else '?'
+        self.history.append(f'you said: {h.rule} Goal: {h.goal} -> test {name}: {verdict}')
+        self.history = self.history[-LLM_HISTORY:]
+        self.last_verdict = verdict
+        self.verdicts += 1
+        self.pending = None
+
+    @staticmethod
+    def check(h: Hypothesis, observation: Observation) -> str:
+        """Did the test action do what the hypothesis predicted?"""
+        if h.test_change == 'nothing':
+            ok = not observation.changes
+        else:
+            mine = [c for c in observation.changes if c.object_id == h.test_object]
+            if h.test_change == 'moved':
+                ok = any((c.kind == 'moved' and Lab._direction_ok(c.dx, c.dy, h.test_direction) for c in mine))
+            else:
+                ok = any((c.kind == h.test_change for c in mine))
+        return f"{('CORRECT' if ok else 'WRONG')} (predicted {h.prediction()}; actually {observation.effects()})"
+
+    @staticmethod
+    def _direction_ok(dx: int, dy: int, direction: str) -> bool:
+        return {'up': dy < 0, 'down': dy > 0, 'left': dx < 0, 'right': dx > 0}.get(direction, True)
 _ACTION_RE = re.compile('ACTION([1-7])(?:\\s+(\\d{1,2})\\s+(\\d{1,2}))?')
 
 class Advice(NamedTuple):
@@ -1318,15 +1706,22 @@ class Advisor:
             return NO_ADVICE
         return Advice(parse_plan(text, available), parse_theory(text))
 
-    def _ask(self, prompt: str, tag: str='') -> str | None:
-        with self._in_flight:
-            return self._send(prompt, tag)
+    def hypothesise(self, question: str, available: list[int], tag: str='') -> Hypothesis | None:
+        """Ask the object question; None if there is no usable answer."""
+        if not self.available():
+            return None
+        text = self._ask(question, tag, OBJECT_SYSTEM_PROMPT, OBJECT_SCHEMA)
+        return parse_hypothesis(text, available) if text else None
 
-    def _send(self, prompt: str, tag: str) -> str | None:
+    def _ask(self, prompt: str, tag: str='', system: str | None=None, schema: dict | None=None) -> str | None:
+        with self._in_flight:
+            return self._send(prompt, tag, system or SYSTEM_PROMPT, schema or PLAN_SCHEMA)
+
+    def _send(self, prompt: str, tag: str, system: str, schema: dict) -> str | None:
         started = time.time()
-        request_body: dict = {'model': self.model, 'messages': [{'role': 'system', 'content': SYSTEM_PROMPT}, {'role': 'user', 'content': prompt}], 'max_tokens': self.max_tokens, **self.sampling, 'chat_template_kwargs': {'enable_thinking': self.thinking}}
+        request_body: dict = {'model': self.model, 'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': prompt}], 'max_tokens': self.max_tokens, **self.sampling, 'chat_template_kwargs': {'enable_thinking': self.thinking}}
         if self.structured:
-            request_body['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'plan', 'schema': PLAN_SCHEMA}}
+            request_body['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'answer', 'schema': schema}}
         body = json.dumps(request_body).encode()
         request = urllib.request.Request(self.url, body, {'Content-Type': 'application/json'})
         try:
@@ -1453,6 +1848,58 @@ class PromptWriter:
         parts.append('Current screen (row number, then 64 hex digits for x=0..63):\n' + self.render_grid(grid))
         return '\n'.join(parts)
 
+    def object_question(self, scene: LevelScene, relations: list[str], observations: list[Observation], history: list[str], available: list[int]) -> str:
+        """The question in terms of objects: what is on screen, what the brain noticed, what actions did."""
+        m = self.memory
+        level = m.level if m.level is not None else 0
+        parts = [f"Level {level + 1}. Lives lost so far: {self.stats['deaths']}. Actions in this game: " + ', '.join((f'ACTION{a}' for a in sorted(available) if a != 0)) + '.']
+        parts.append('Objects on screen now:\n' + '\n'.join((f'  {line}' for line in self._object_lines(scene))))
+        if relations:
+            parts.append('Relations the agent noticed:\n' + '\n'.join((f'  {r}' for r in relations)))
+        if observations:
+            parts.append('What the most recent actions did (oldest first):\n' + '\n'.join((f'  {o.describe()}' for o in observations)))
+        else:
+            parts.append('No action has been taken on this level yet.')
+        if history:
+            parts.append('Your earlier explanations and how their tests turned out:\n' + '\n'.join((f'  {h}' for h in history)))
+        return '\n'.join(parts)
+
+    @staticmethod
+    def _object_lines(scene: LevelScene) -> list[str]:
+        """One line per object; composites (parts that always move together) and split objects appear once."""
+        first: dict[int, SceneObject] = {}
+        pieces: dict[int, int] = {}
+        for o in scene.objects:
+            root = scene.root(o.id)
+            pieces[o.id] = pieces.get(o.id, 0) + 1
+            if root == o.id and o.id not in first:
+                first[o.id] = o
+        lines: list[str] = []
+        kinds: dict[tuple, list[SceneObject]] = {}
+        for o in first.values():
+            if o.background:
+                lines.append(o.describe())
+            else:
+                kinds.setdefault((o.colour, o.shape, not scene.members(o.id)), []).append(o)
+        for group in sorted(kinds.values(), key=lambda g: -g[0].size)[:28]:
+            if len(group) >= 3:
+                where = ' '.join((f'(x{o.bbox[1]},y{o.bbox[0]})' for o in group[:12]))
+                what = group[0].describe().split(', ', 1)[1].split(' box at')[0]
+                ids = ' '.join((f'#{o.id}' for o in group))
+                lines.append(f'{ids}: {len(group)} identical {what} objects at {where}')
+                continue
+            for o in group:
+                line = o.describe()
+                if pieces.get(o.id, 1) > 1:
+                    line += f' (now in {pieces[o.id]} pieces: partly covered)'
+                parts = scene.members(o.id)
+                if parts:
+                    line += ' + parts ' + ' '.join((f'#{i}' for i in parts)) + ' (they always move with it)'
+                lines.append(line)
+        if len(kinds) > 28:
+            lines.append('... and more small objects not listed')
+        return lines
+
     @staticmethod
     def render_grid(grid: np.ndarray) -> str:
         return '\n'.join((f'{y:02d} ' + ''.join((f'{v:x}' for v in row)) for y, row in enumerate(grid.tolist())))
@@ -1520,7 +1967,7 @@ class Tracer:
             return None
         return Tracer(Path(folder) / f"{name.split('-')[0]}.jsonl")
 
-    def record(self, state: str, grid: np.ndarray | None, action: Action, world: World, memory: WorkingMemory, stats: dict) -> None:
+    def record(self, state: str, grid: np.ndarray | None, action: Action, world: World, memory: WorkingMemory, stats: dict, check: str='') -> None:
         record: dict = {'i': self._step, 'state': state, 'level': memory.level, 'action': list(action), 'why': memory.why, 'outcome': memory.last_outcome, 'life': memory.life_length, 'deaths': stats.get('deaths', 0), 'avatar': world.avatar.colour, 'mode': world.mode.value if world.mode else None}
         level_map = world.levels.get(memory.level) if memory.level is not None else None
         record['screens'] = len(level_map.screens) if level_map else 0
@@ -1529,6 +1976,8 @@ class Tracer:
             if raw != self._last_grid:
                 record['grid'] = base64.b64encode(zlib.compress(raw, 6)).decode()
                 self._last_grid = raw
+        if check:
+            record['check'] = check
         if memory.theory and memory.theory != self._last_theory:
             record['theory'] = memory.theory
             self._last_theory = memory.theory
@@ -1559,12 +2008,19 @@ class Brain:
         self.explorer = Explorer(self.world, self.memory, self.goals, self.rng, self.stats, self.restart_level)
         self.prompt = PromptWriter(self.world, self.memory, self.stats)
         self.tracer = Tracer.for_game(name)
+        self.mode = os.environ.get('ARC3_LLM_MODE', LLM_MODE)
+        self.scene = SceneTracker(self.world) if self.mode == 'hypothesis' else None
+        self.lab = Lab()
+        self._traced_verdicts = 0
 
     def next_action(self, state: str, frame_layers, levels_completed: int, available: list[int], full_reset: bool=False) -> Action:
         """The whole agent: given the latest frame, return (action_id, x, y)."""
         action = self._think(state, frame_layers, levels_completed, available, full_reset)
         if self.tracer is not None:
-            self.tracer.record(state, ScreenReader.settled_grid(frame_layers), action, self.world, self.memory, self.stats)
+            verdicts = self.lab.verdicts
+            check = self.lab.last_verdict if verdicts != self._traced_verdicts else ''
+            self._traced_verdicts = verdicts
+            self.tracer.record(state, ScreenReader.settled_grid(frame_layers), action, self.world, self.memory, self.stats, check)
         self.stats['actions'] += 1
         self.memory.life_length = 0 if action == RESET_ACTION else self.memory.life_length + 1
         return action
@@ -1631,7 +2087,8 @@ class Brain:
             self.stats['route_mismatches'] += 1
             m.route = []
         self._note_last_step(grid, screen_id)
-        action = self._advice(level_map, grid, available)
+        self._watch_scene(grid)
+        action = self._experiment(level_map, grid, available) if self.scene is not None else self._advice(level_map, grid, available)
         m.last_from_advisor = action is not None
         if action is None:
             action = self.explorer.choose(level_map, screen, available)
@@ -1655,6 +2112,40 @@ class Brain:
         if m.last_from_advisor and screen_id == m.last_screen_id and m.plan:
             self.stats['llm_plans_dropped'] += 1
             m.plan = []
+
+    def _watch_scene(self, grid: np.ndarray) -> None:
+        """Hypothesis mode: track the objects; if the last action was the LLM's test, check its prediction."""
+        m = self.memory
+        if self.scene is None or m.level is None:
+            return
+        last = m.last_action if m.last_action != RESET_ACTION else None
+        observation = self.scene.update(m.level, grid, last)
+        pending = self.lab.pending
+        if pending is not None and observation is not None and (observation.action == pending.test_action):
+            verdict = Lab.check(pending, observation)
+            self.stats['llm_tests_correct' if verdict.startswith('CORRECT') else 'llm_tests_wrong'] += 1
+            self.lab.record(verdict)
+
+    def _experiment(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
+        """Hypothesis mode: every LLM_ASK_EVERY brain actions, ask the object question and run its test action."""
+        m = self.memory
+        adviser = advisor()
+        if adviser is None or self.scene is None or m.level is None or level_map.has_solution or (self.lab.pending is not None) or (self.stats['actions'] < self.lab.next_ask_at):
+            return None
+        scene = self.scene.scene(m.level)
+        wholes = [o for o in scene.objects if scene.root(o.id) == o.id]
+        question = self.prompt.object_question(scene, RelationFinder.find(wholes, *grid.shape), list(scene.observations)[-12:], self.lab.history, available)
+        self.stats['llm_questions'] += 1
+        hypothesis = adviser.hypothesise(question, available, tag=self.name)
+        self.lab.next_ask_at = self.stats['actions'] + LLM_ASK_EVERY
+        if hypothesis is None or hypothesis.test_action is None:
+            return None
+        self.lab.latest = self.lab.pending = hypothesis
+        m.theory = f'{hypothesis.rule} | goal: {hypothesis.goal} | controlled: {hypothesis.controlled}'
+        m.why = f'LLM test: expects {hypothesis.prediction()}'
+        m.route, m.expected_screen = ([], None)
+        self.stats['llm_actions'] += 1
+        return hypothesis.test_action
 
     def _advice(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
         """The advisor's next action, or None (advisor off, level already solved, no usable answer)."""
@@ -1740,6 +2231,8 @@ class Brain:
     def _on_death(self) -> None:
         m, world = (self.memory, self.world)
         self.stats['deaths'] += 1
+        if self.lab.pending is not None:
+            self.lab.record('the test action LOST A LIFE')
         m.plan = []
         if m.last_action not in (None, RESET_ACTION):
             assert m.last_action is not None
@@ -1763,6 +2256,8 @@ class Brain:
     def _on_level_up(self, new_level: int) -> None:
         m, world = (self.memory, self.world)
         self.stats['level_ups'] += 1
+        if self.lab.pending is not None:
+            self.lab.record('the test action FINISHED THE LEVEL')
         m.plan = []
         if m.last_action not in (None, RESET_ACTION):
             assert m.last_action is not None

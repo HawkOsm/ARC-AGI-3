@@ -10,6 +10,7 @@ Off unless the environment variable ARC3_TRACE_DIR names a folder. Then every Br
     why        who chose the action and why (brain explorer / known solution / LLM plan step / reset ...)
     outcome    what the PREVIOUS action did ("ACTION3 -> 12 cells changed ...", "... LEVEL COMPLETE ...")
     theory     the LLM's theory, only on the step where a new one arrived
+    check      hypothesis mode: the verdict on the LLM's last test, on the step where it was judged
     life, deaths, screens, avatar, mode    the brain's state at that moment
 Nothing in here is read back by the agent; it only writes.
 """
@@ -44,7 +45,7 @@ class Tracer:
         return Tracer(Path(folder) / f"{name.split('-')[0]}.jsonl")
 
     def record(self, state: str, grid: np.ndarray | None, action: Action, world: World, memory: WorkingMemory,
-               stats: dict) -> None:
+               stats: dict, check: str = "") -> None:
         record: dict = {"i": self._step, "state": state, "level": memory.level, "action": list(action),
                         "why": memory.why, "outcome": memory.last_outcome, "life": memory.life_length,
                         "deaths": stats.get("deaths", 0), "avatar": world.avatar.colour,
@@ -56,6 +57,8 @@ class Tracer:
             if raw != self._last_grid:
                 record["grid"] = base64.b64encode(zlib.compress(raw, 6)).decode()
                 self._last_grid = raw
+        if check:
+            record["check"] = check
         if memory.theory and memory.theory != self._last_theory:
             record["theory"] = memory.theory
             self._last_theory = memory.theory

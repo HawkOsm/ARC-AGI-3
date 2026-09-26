@@ -144,8 +144,8 @@ eval-llm: build ## Swarm eval with the advisor on, against `make llm-local` (BUD
 	ARC3_LLM_URL=http://127.0.0.1:$(LLM_PORT)/v1 ARC3_LLM_LOG=.claude/scratch/llm/local/requests.jsonl ARC3_LLM_MAX_CONCURRENT=8 \
 	    $(VENV_PY) eval/run.py --agent $(AGENT) --swarm --max-actions $(BUDGET) --label llm_local
 
-debug: ## Play ONE game, printing every decision: make debug GAME=ar25 STEPS=150 [LLM=1] (LLM needs make llm-local)
-	$(VENV_PY) eval/debug_run.py $(or $(GAME),ls20) --steps $(STEPS) $(if $(LLM),--llm,)
+debug: ## Play ONE game, printing every decision: make debug GAME=ar25 STEPS=150 [LLM=1 | HYP=1] (needs make llm-local)
+	$(VENV_PY) eval/debug_run.py $(or $(GAME),ls20) --steps $(STEPS) $(if $(LLM),--llm,) $(if $(HYP),--hypothesis,)
 
 dashboard: ## Rebuild the run board page from the run files (.claude/scratch/dashboard/arc3-run-board.html)
 	$(VENV_PY) eval/dashboard.py

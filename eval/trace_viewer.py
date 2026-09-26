@@ -128,6 +128,7 @@ button.on { background: var(--accent); border-color: var(--accent); color: #fff;
       <div class="card"><span class="k">What it did</span><div class="result" id="result"></div></div>
       <div class="card"><span class="k">What the brain knows</span><div id="brain"></div></div>
       <div class="card"><span class="k">LLM theory</span><div class="theory" id="theory"></div></div>
+      <div class="card" id="check-card" hidden><span class="k">Last test of the LLM's prediction</span><div class="result" id="check"></div></div>
     </div>
   </div>
 </div>
@@ -185,6 +186,11 @@ function show(i) {
   let t = null, at = null;
   for (let j = step; j >= 0; j--) if (rows[j].theory) { t = rows[j].theory; at = j; break; }
   $("theory").innerHTML = t ? `${esc(t)}<small>received at step ${at}</small>` : "<span class='muted'>No LLM in this run, or it has not answered yet.</span>";
+  let ck = null, ckAt = null;
+  for (let j = step; j >= 0; j--) if (rows[j].check) { ck = rows[j].check; ckAt = j; break; }
+  $("check-card").hidden = !rows.some(r => r.check);
+  $("check").className = "result " + (ck && ck.startsWith("CORRECT") ? "good" : ck ? "bad" : "none");
+  $("check").textContent = ck ? `${ck}  (judged at step ${ckAt})` : "no test judged yet";
   drawCursor();
 }
 function drawFrame(f, next, action) {

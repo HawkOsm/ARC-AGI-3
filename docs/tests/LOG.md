@@ -4,6 +4,25 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-26 — Hypothesis mode, step 1 (object questions + tested predictions), local 4B on ar25
+- Change: `agent/brain/scene.py` (numbered objects with ids kept through movement, twins, partial covering and
+  splits; composites = parts that moved together touching >=2 times and never apart; relations: mirror images across
+  a line, same size/shape in different colours; per-action effects). `ARC3_LLM_MODE=hypothesis`: every 4 brain
+  actions the brain asks the object question; the answer (JSON schema) gives rule, controlled ids, goal, roles and ONE
+  test action with a predicted effect; the brain runs the test and judges it (`Lab.check`); verdicts feed the next
+  question. Debug runner `--hypothesis --show-question`; traces carry verdicts; 5 new tests (35 total).
+- Command: `eval/debug_run.py ar25 --hypothesis --steps 80 --trace` (4 runs while fixing the tracker).
+- Result: owner's reading of ar25 = grey L (controlled) mirrored as a black L across the light-blue line, goal = cover
+  the yellow 9x9 block. The brain's own scene finds "#7 is where #5 would be mirrored across #2" and "#5, #6 same
+  shape". Tracker fixes were needed (twins matched by common displacement; ids kept when partly covered; strict
+  composites — a loose rule merged the mirror line with the L). Final runs: tests 13/7 and 9/10 correct/wrong over
+  ~20 questions; the model converges to the right controls ("ACTION3 moves #5 right and the black group left, ACTION4
+  the reverse") but never names the yellow block as the goal ("#15 covers #5", "#5 returns to its uncut state");
+  the same-shape relation disappears once #5 is partly covered, so later questions lose that clue. 0 levels in 80 steps
+  (the brain still chooses all non-test actions; step 2 would use the goal).
+- Verdict: INFO — the object question gets the mechanics right where the hex question never did (9,292 v5 answers,
+  no mirror); goal inference is the open problem.
+
 ## 2026-09-26 — GPU dev run v5 (27B, no thinking, structured JSON): reliable answers, far worse play
 - Change: structured JSON output + compact JSON + `--language-model-only` (agent from before the in-flight limit).
 - Command: `notebooks/llm_dev/build.py --arm nothink:0:5400 --max-actions 1000`; brain reference via
