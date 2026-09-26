@@ -126,16 +126,24 @@ eval-swarm: build ## All games as threads in one process (Kaggle's execution mod
 LLM_VENV   := .venv-llm
 LLM_MODEL  ?= models/Qwen3.5-4B-AWQ
 LLM_PORT   ?= 8000
+LLM_VISION ?= 0  # 1 = serve the model's vision part too (play mode sends screens as images)
+LLM_MM_VISION := --limit-mm-per-prompt '{"image": 32, "video": 0}'
+LLM_MM_FLAGS = $(if $(filter 1,$(LLM_VISION)),$(LLM_MM_VISION),--language-model-only)
+LLM_MAX_LEN ?= 16384  # context per request (the Duck is built for 32768)
+LLM_GPU_UTIL ?= 0.85
+LLM_TOOLS  ?= 0  # 1 = tool calling as the Duck harness needs it (vendor/duck; eval/duck_run.py)
+LLM_TOOL_CALLS := --enable-auto-tool-choice --tool-call-parser qwen3_coder --default-chat-template-kwargs '{"preserve_thinking": true}'
+LLM_TOOL_FLAGS = $(if $(filter 1,$(LLM_TOOLS)),$(LLM_TOOL_CALLS),)
 
 llm-local-setup: ## One-time: vLLM 0.30.0 (same as Kaggle) in .venv-llm + the 4B dev model in models/
 	@[ -x $(LLM_VENV)/bin/python ] || uv venv --python $(PYTHON) $(LLM_VENV)
 	uv pip install --python $(LLM_VENV)/bin/python "vllm==0.30.0"
 	$(VENV_PY) -c "from huggingface_hub import snapshot_download as d; d('cyankiwi/Qwen3.5-4B-AWQ-4bit', revision='ef85d23beb', local_dir='models/Qwen3.5-4B-AWQ')"
 
-llm-local: ## Serve the dev model on :$(LLM_PORT) (same flags as the Kaggle dev notebook); Ctrl-C stops it
+llm-local: ## Serve the dev model on :$(LLM_PORT) (LLM_VISION=1 for play mode's images); Ctrl-C stops it
 	VLLM_USE_FLASHINFER_SAMPLER=0 VLLM_NO_USAGE_STATS=1 $(LLM_VENV)/bin/python -m vllm.entrypoints.openai.api_server \
 	    --model $(LLM_MODEL) --served-model-name qwen --host 127.0.0.1 --port $(LLM_PORT) \
-	    --language-model-only --max-model-len 16384 --gpu-memory-utilization 0.85 \
+	    $(LLM_MM_FLAGS) $(LLM_TOOL_FLAGS) --max-model-len $(LLM_MAX_LEN) --gpu-memory-utilization $(LLM_GPU_UTIL) \
 	    --max-num-seqs 32 --max-num-batched-tokens 4096 \
 	    --enable-prefix-caching --reasoning-parser qwen3 \
 	    --structured-outputs-config '{"backend": "xgrammar", "disable_any_whitespace": true, "reasoning_parser": "qwen3"}'

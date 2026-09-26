@@ -119,6 +119,11 @@ LLM_PLAN_MAX = 8  # actions taken from one answer before asking again
 # "hypothesis": the brain asks about OBJECTS (what is controlled, what is the goal, roles) and runs the LLM's one
 # test action per question to check its prediction; every other action is the brain's. ARC3_LLM_MODE overrides.
 LLM_MODE = "drive"
+LLM_PLAY_FRAMES = 3  # play mode: recent screens sent as images (Reki sends "the recent frames")
+LLM_PLAY_SCALE = 6  # play mode: image pixels per cell (64 cells -> 384 px + ruler)
+LLM_PLAY_MAX_ACTIONS = 4  # play mode: actions per answer (Reki: "the next 1-4 actions")
+LLM_PLAY_NOTES = True  # play mode: the model keeps notes across calls (forge's best run had memory off: ablate)
+LLM_PLAY_TEXT_GRID = False  # play mode: also send the current screen as hex text (Tufa Labs used several views)
 LLM_IDLE_NEW_SCREENS = 3  # hypothesis mode, nothing to steer: new screens explored before the LLM hears of them
 LLM_HISTORY = 6  # hypothesis mode: earlier explanations + test verdicts shown to the model
 LLM_RECENT_STEPS = 16  # recent steps (action -> what happened) shown to the model

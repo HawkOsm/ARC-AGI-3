@@ -25,6 +25,7 @@ from .goals import GoalBoard, Goals, ScreenFeatures
 from .learn import ActionLearner, AvatarLearner, CounterLearner, DeathJudge, TouchLearner
 from .lessons import GameLessons
 from .llm import CLICK_OBJECT, Briefing, Lab, PromptWriter, advisor
+from .player import Player
 from .look import FirstLook, ScreenReader
 from .scene import RelationFinder, SceneTracker
 from .steer import UNLOCK_TRIES, Prober, Steerer
@@ -86,6 +87,7 @@ class Brain:
         self._traced_verdicts = 0
         self.memory_available: list[int] = []
         self.last_why = ""  # why the last action was taken (m.why is cleared at the start of each step)
+        self.player = Player() if self.mode == "play" else None  # play mode: the LLM drives (player.py)
         self.steer_stops: dict[tuple, int] = {}  # goal -> times steering toward it gave up (this level)
         self.parked: set[int] = set()  # objects placed on a target this level (kept: the level needs them there)
 
@@ -177,8 +179,7 @@ class Brain:
         self._watch_scene(grid)
 
         # 4. DECIDE
-        action = self._experiment(level_map, grid, available) if self.scene is not None \
-            else self._advice(level_map, grid, available)
+        action = self._llm_decides(level_map, grid, available)
         m.last_from_advisor = action is not None
         if action is None:
             action = self.explorer.choose(level_map, screen, available)
@@ -430,6 +431,11 @@ class Brain:
             hypothesis = hypothesis._replace(test_action=click_on(target) if target is not None else None)
         if hypothesis is None or hypothesis.test_action is None:
             return None
+        if hypothesis.test_action[0] == 6 and not any(a in available for a in (1, 2, 3, 4, 5)):
+            self.goal_board.vote(self.goal_list, hypothesis.goal_choice)  # click-only game: the LLM explains and
+            self.goal_board.roles.update(hypothesis.roles)             # picks goals; the explorer clicks (its
+            self.stats["llm_tests_click_game"] += 1                    # systematic clicks beat the LLM's there)
+            return None
         level_map = self.world.levels.get(m.level)
         screen = level_map.screens.get(self._screen_id(grid)) if level_map is not None else None
         if self._already_known(hypothesis, controls) \
@@ -456,6 +462,39 @@ class Brain:
         m.route, m.expected_screen = [], None
         self.stats["llm_actions"] += 1
         return hypothesis.test_action
+
+    def _llm_decides(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
+        """The LLM's action in the current mode (play / hypothesis / drive), or None: the brain decides."""
+        if self.player is not None:
+            return self._play(level_map, grid, available)
+        if self.scene is not None:
+            return self._experiment(level_map, grid, available)
+        return self._advice(level_map, grid, available)
+
+    def _play(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
+        """Play mode: the model's queued actions, asking it again when the queue is empty. None (the brain decides)
+        when there is no model or no usable answer, or the level is already solved (the brain replays the route)."""
+        m, player = self.memory, self.player
+        assert player is not None and m.level is not None
+        last = m.last_action if m.last_action not in (None, RESET_ACTION) else None
+        before = m.last_grid if last is not None else None
+        player.observe(grid, last, before, before is not None and self._screen_id(before) != self._screen_id(grid))
+        adviser = advisor()
+        if adviser is None or level_map.has_solution:
+            return None
+        for _attempt in range(2):
+            while player.queue:
+                action = player.legal(player.queue.pop(0), grid, available)
+                if action is not None:
+                    m.why, m.route, m.expected_screen = player.last_why, [], None
+                    self.stats["llm_actions"] += 1
+                    return action
+                self.stats["play_actions_refused"] += 1  # not offered here, or a click on a dead kind
+            self.stats["llm_questions"] += 1
+            if not player.ask(adviser, m.level, self.stats["deaths"], available, self.name):
+                self.stats["play_no_answer"] += 1
+                return None
+        return None
 
     def _advice(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
         """The advisor's next action, or None (advisor off, level already solved, no usable answer)."""
@@ -549,6 +588,8 @@ class Brain:
     def _on_death(self) -> None:
         m, world = self.memory, self.world
         self.stats["deaths"] += 1
+        if self.player is not None:
+            self.player.drop_plan()
         if self.lab.pending is not None:
             self.lab.record("the test action LOST A LIFE")
         if self.scene is not None:
@@ -577,6 +618,8 @@ class Brain:
     def _on_level_up(self, new_level: int) -> None:
         m, world = self.memory, self.world
         self.stats["level_ups"] += 1
+        if self.player is not None:
+            self.player.new_level()
         if self.lab.pending is not None:
             self.lab.record("the test action FINISHED THE LEVEL")
         if self.scene is not None and m.level is not None:

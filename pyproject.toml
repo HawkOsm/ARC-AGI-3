@@ -2,7 +2,7 @@
 line-length = 120
 target-version = "py312"
 # Generated single-file agents (agent/my_agent.py, experiments/, eval/champion/) are not linted — agent/brain/ is.
-extend-exclude = ["agent/my_agent.py", "vendor", "reference", "environment_files", ".claude", "experiments", "eval/champion/my_agent.py"]
+extend-exclude = ["agent/my_agent.py", "vendor", "notebooks/duck_repro", "reference", "environment_files", ".claude", "experiments", "eval/champion/my_agent.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "C901", "B"]

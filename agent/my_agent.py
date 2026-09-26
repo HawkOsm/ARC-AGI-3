@@ -27,6 +27,7 @@ import os
 import random
 import re
 import resource
+import struct
 import threading
 import time
 import traceback
@@ -98,6 +99,11 @@ LLM_SAMPLING_THINKING = {'temperature': 1.0, 'top_p': 0.95, 'top_k': 20, 'presen
 LLM_STRUCTURED_OUTPUT = True
 LLM_PLAN_MAX = 8
 LLM_MODE = 'drive'
+LLM_PLAY_FRAMES = 3
+LLM_PLAY_SCALE = 6
+LLM_PLAY_MAX_ACTIONS = 4
+LLM_PLAY_NOTES = True
+LLM_PLAY_TEXT_GRID = False
 LLM_IDLE_NEW_SCREENS = 3
 LLM_HISTORY = 6
 LLM_RECENT_STEPS = 16
@@ -2612,11 +2618,18 @@ class Advisor:
         text = self._ask(question, tag, OBJECT_SYSTEM_PROMPT, OBJECT_SCHEMA)
         return parse_hypothesis(text, available) if text else None
 
+    def ask_parts(self, parts: list[dict], tag: str, system: str, schema: dict) -> str | None:
+        """A question made of text and image parts (play mode); None if there is no answer."""
+        if not self.available():
+            return None
+        with self._in_flight:
+            return self._send(parts, tag, system, schema)
+
     def _ask(self, prompt: str, tag: str='', system: str | None=None, schema: dict | None=None) -> str | None:
         with self._in_flight:
             return self._send(prompt, tag, system or SYSTEM_PROMPT, schema or PLAN_SCHEMA)
 
-    def _send(self, prompt: str, tag: str, system: str, schema: dict) -> str | None:
+    def _send(self, prompt: str | list[dict], tag: str, system: str, schema: dict) -> str | None:
         started = time.time()
         request_body: dict = {'model': self.model, 'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': prompt}], 'max_tokens': self.max_tokens, **self.sampling, 'chat_template_kwargs': {'enable_thinking': self.thinking}}
         if self.structured:
@@ -2878,6 +2891,220 @@ class PromptWriter:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# agent/brain/render.py
+# ──────────────────────────────────────────────────────────────────────────
+
+PALETTE = np.array([(255, 255, 255), (204, 204, 204), (153, 153, 153), (102, 102, 102), (51, 51, 51), (0, 0, 0), (229, 58, 163), (255, 123, 204), (249, 60, 49), (30, 147, 255), (136, 216, 241), (255, 220, 0), (255, 133, 27), (146, 18, 49), (79, 204, 48), (163, 86, 214)], dtype=np.uint8)
+MARGIN = 16
+RULER_EVERY = 8
+DIGITS = {'0': '111101101101111', '1': '010110010010111', '2': '111001111100111', '3': '111001111001111', '4': '101101111001001', '5': '111100111001111', '6': '111100111101111', '7': '111001001001001', '8': '111101111101111', '9': '111101111001111'}
+
+class FramePainter:
+    """Grid -> PNG bytes (a utility class)."""
+
+    @staticmethod
+    def png(grid: np.ndarray, scale: int=8, mark: tuple[int, int] | None=None) -> bytes:
+        return FramePainter.encode(FramePainter.pixels(grid, scale, mark))
+
+    @staticmethod
+    def pixels(grid: np.ndarray, scale: int, mark: tuple[int, int] | None=None) -> np.ndarray:
+        """RGB image: ruler margin + the screen, `scale` pixels per cell."""
+        h, w = grid.shape
+        colours = PALETTE[np.clip(grid, 0, 15)]
+        screen = colours.repeat(scale, axis=0).repeat(scale, axis=1)
+        image = np.full((MARGIN + h * scale, MARGIN + w * scale, 3), 235, dtype=np.uint8)
+        image[MARGIN:, MARGIN:] = screen
+        for cell in range(RULER_EVERY, max(h, w), RULER_EVERY):
+            p = MARGIN + cell * scale
+            if cell < h:
+                image[p, MARGIN:] = image[p, MARGIN:] // 2 + 64
+            if cell < w:
+                image[MARGIN:, p] = image[MARGIN:, p] // 2 + 64
+        for cell in range(0, max(h, w), RULER_EVERY):
+            p = MARGIN + cell * scale
+            if cell < w:
+                FramePainter._text(image, str(cell), 2, p + 1)
+            if cell < h:
+                FramePainter._text(image, str(cell), p + 2, 1)
+        if mark is not None:
+            x, y = mark
+            y0, x0 = (MARGIN + y * scale - 2, MARGIN + x * scale - 2)
+            ring = np.array([255, 0, 255], dtype=np.uint8)
+            for d in range(scale + 4):
+                for yy, xx in ((y0, x0 + d), (y0 + scale + 3, x0 + d), (y0 + d, x0), (y0 + d, x0 + scale + 3)):
+                    if 0 <= yy < image.shape[0] and 0 <= xx < image.shape[1]:
+                        image[yy, xx] = ring
+        return image
+
+    @staticmethod
+    def _text(image: np.ndarray, text: str, top: int, left: int) -> None:
+        """Dark digits, each 3x5 font pixels drawn 2x2."""
+        for i, ch in enumerate(text):
+            bits = DIGITS[ch]
+            for k, bit in enumerate(bits):
+                if bit == '1':
+                    y, x = (top + k // 3 * 2, left + i * 7 + k % 3 * 2)
+                    image[y:y + 2, x:x + 2] = 40
+
+    @staticmethod
+    def encode(image: np.ndarray) -> bytes:
+        """RGB uint8 array -> PNG (8-bit truecolour, no filtering)."""
+        h, w, _ = image.shape
+        raw = b''.join((b'\x00' + image[y].tobytes() for y in range(h)))
+
+        def chunk(kind: bytes, data: bytes) -> bytes:
+            return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+        return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw, 6)) + chunk(b'IEND', b'')
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# agent/brain/player.py
+# ──────────────────────────────────────────────────────────────────────────
+
+PLAY_SYSTEM_PROMPT = 'You are playing an unknown turn-based puzzle game on a 64x64 grid of coloured cells. Nobody tells you the rules or the goal: find them out by playing. Finishing a level shows the next one; the step counter or lives shown on screen running out loses the life and restarts the level. Every action counts: finish each level in as few actions as possible.\n- ACTION1..ACTION5 are simple inputs (often up, down, left, right, use/select). ACTION6 x y clicks the cell at column x, row y (0-63; read them off the rulers: the numbers mark every 8th cell). ACTION7 is often undo. Only the listed actions exist in this game.\n- You see the most recent screens, oldest first; the last one is the current screen. A magenta ring marks the cell of the last click.\nAnswer with one JSON object: changed = what the last actions did; plan = your short plan; notes = what you have learned about this game so far (kept for you and shown again next time); actions = the next 1 to 4 actions.'
+PLAY_SCHEMA = {'type': 'object', 'properties': {'changed': {'type': 'string', 'maxLength': 300}, 'plan': {'type': 'string', 'maxLength': 300}, 'notes': {'type': 'string', 'maxLength': 500}, 'actions': {'type': 'array', 'minItems': 1, 'maxItems': LLM_PLAY_MAX_ACTIONS, 'items': {'type': 'string', 'pattern': '^ACTION[1-7]( [0-9]{1,2} [0-9]{1,2})?$'}}}, 'required': ['changed', 'plan', 'notes', 'actions'], 'additionalProperties': False}
+
+class PlayAnswer(NamedTuple):
+    changed: str
+    plan: str
+    notes: str
+    actions: list[Action]
+
+def parse_play(text: str, available: list[int]) -> PlayAnswer | None:
+    try:
+        data = json.loads(text[text.index('{'):text.rindex('}') + 1])
+        actions = parse_plan(json.dumps({'plan': data['actions']}), available)
+        return PlayAnswer(str(data.get('changed', '')), str(data.get('plan', '')), str(data.get('notes', '')), actions[:LLM_PLAY_MAX_ACTIONS])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+@dataclass(slots=True)
+class Seen:
+    grid: np.ndarray
+    action: Action | None
+    changed: bool
+    step: int
+
+class ClickHelper:
+    """Reki's click helpers (a utility class)."""
+
+    @staticmethod
+    def kind_at(grid: np.ndarray, x: int, y: int) -> tuple | None:
+        """(colour, shape) of the object under a cell; None outside the screen."""
+        if not (0 <= y < grid.shape[0] and 0 <= x < grid.shape[1]):
+            return None
+        for blob in ScreenReader.find_objects(grid):
+            if blob.bbox[0] <= y <= blob.bbox[2] and blob.bbox[1] <= x <= blob.bbox[3] and bool(((blob.cells[:, 0] == y) & (blob.cells[:, 1] == x)).any()):
+                return (blob.colour, ScreenReader.shape_of(blob))
+        return None
+
+    @staticmethod
+    def snap(grid: np.ndarray, x: int, y: int, radius: int=2) -> tuple[int, int]:
+        """A click on the background next to a small object lands on the object (vision models miss by a cell or
+        two); anything else stays where it is."""
+        counts = np.bincount(grid.ravel(), minlength=16)
+        background = int(counts.argmax())
+        if 0 <= y < grid.shape[0] and 0 <= x < grid.shape[1] and (grid[y, x] != background):
+            return (x, y)
+        best: tuple[int, int, int] | None = None
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                yy, xx = (y + dy, x + dx)
+                if 0 <= yy < grid.shape[0] and 0 <= xx < grid.shape[1] and (grid[yy, xx] != background):
+                    d = abs(dy) + abs(dx)
+                    if best is None or d < best[0]:
+                        best = (d, xx, yy)
+        return (best[1], best[2]) if best else (x, y)
+
+@dataclass(slots=True)
+class Player:
+    """The model's side of play mode: what it has seen, its notes and plan, the actions it queued."""
+    frames: deque = field(default_factory=lambda: deque(maxlen=LLM_PLAY_FRAMES))
+    notes: str = ''
+    plan: str = ''
+    changed: str = ''
+    queue: list[Action] = field(default_factory=list)
+    dead_kinds: set = field(default_factory=set)
+    live_kinds: set = field(default_factory=set)
+    step: int = 0
+    last_why: str = ''
+
+    def observe(self, grid: np.ndarray, action: Action | None, before: np.ndarray | None, changed: bool) -> None:
+        """The screen after `action`; learn which clicked kinds are dead."""
+        self.step += 1
+        self.frames.append(Seen(grid, action, changed, self.step))
+        if action is not None and action[0] == 6 and (before is not None):
+            kind = ClickHelper.kind_at(before, action[1], action[2])
+            if kind is not None:
+                if changed:
+                    self.live_kinds.add(kind)
+                    self.dead_kinds.discard(kind)
+                elif kind not in self.live_kinds:
+                    self.dead_kinds.add(kind)
+
+    def new_level(self) -> None:
+        self.queue, self.plan, self.dead_kinds, self.live_kinds = ([], '', set(), set())
+
+    def drop_plan(self) -> None:
+        self.queue = []
+
+    def legal(self, action: Action, grid: np.ndarray, available: list[int]) -> Action | None:
+        """The action as it will be sent (clicks snapped onto objects), or None: not offered, or a dead click."""
+        if action[0] not in available:
+            return None
+        if action[0] != 6:
+            return action
+        x, y = ClickHelper.snap(grid, action[1], action[2])
+        if ClickHelper.kind_at(grid, x, y) in self.dead_kinds:
+            return None
+        return Action(6, x, y)
+
+    def parts(self, level: int, lives_lost: int, available: list[int]) -> list[dict]:
+        """The user message: text, then each recent screen as an image (oldest first)."""
+        names = ', '.join(('ACTION6 x y' if a == 6 else f'ACTION{a}' for a in sorted(available) if a != 0))
+        lines = [f'Level {level + 1}. Lives lost so far: {lives_lost}. Actions in this game: {names}.']
+        if LLM_PLAY_NOTES and self.notes:
+            lines.append(f'Your notes so far: {self.notes}')
+        if self.plan:
+            lines.append(f'Your last plan: {self.plan}')
+        if self.dead_kinds:
+            lines.append(f'{len(self.dead_kinds)} kind(s) of object never changed anything when clicked on this level; clicks on them are skipped.')
+        lines.append('Recent screens, oldest first (the last one is now):')
+        parts: list[dict] = [{'type': 'text', 'text': '\n'.join(lines)}]
+        frames = list(self.frames)
+        for i, seen in enumerate(frames):
+            label = 'the level start' if seen.action is None else f"after {_name(seen.action)} ({('the screen changed' if seen.changed else 'NOTHING changed')})"
+            label = f"Screen {i + 1} of {len(frames)}{(' (NOW)' if i == len(frames) - 1 else '')}: {label}"
+            parts.append({'type': 'text', 'text': label})
+            mark = (seen.action[1], seen.action[2]) if seen.action is not None and seen.action[0] == 6 else None
+            png = FramePainter.png(seen.grid, LLM_PLAY_SCALE, mark)
+            parts.append({'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(png).decode()}})
+        if LLM_PLAY_TEXT_GRID and frames:
+            rows = '\n'.join((f'{y:02d} ' + ''.join((f'{v:x}' for v in row)) for y, row in enumerate(frames[-1].grid)))
+            parts.append({'type': 'text', 'text': 'The current screen as hex digits (row, then x=0..63):\n' + rows})
+        return parts
+
+    def ask(self, adviser: Advisor, level: int, lives_lost: int, available: list[int], tag: str) -> bool:
+        """One call: the model sees the recent screens and queues its next actions; False if no usable answer."""
+        text = adviser.ask_parts(self.parts(level, lives_lost, available), tag, PLAY_SYSTEM_PROMPT, PLAY_SCHEMA)
+        answer = parse_play(text, available) if text else None
+        if answer is None or not answer.actions:
+            return False
+        self.take(answer)
+        return True
+
+    def take(self, answer: PlayAnswer) -> None:
+        self.changed, self.plan = (answer.changed, answer.plan)
+        if LLM_PLAY_NOTES and answer.notes:
+            self.notes = answer.notes
+        self.queue = list(answer.actions)
+        self.last_why = f'LLM plays: {answer.plan}'[:200]
+
+def _name(action: Action) -> str:
+    return f'ACTION6 {action[1]} {action[2]}' if action[0] == 6 else f'ACTION{action[0]}'
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # agent/brain/trace.py
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -2959,6 +3186,7 @@ class Brain:
         self._traced_verdicts = 0
         self.memory_available: list[int] = []
         self.last_why = ''
+        self.player = Player() if self.mode == 'play' else None
         self.steer_stops: dict[tuple, int] = {}
         self.parked: set[int] = set()
 
@@ -3038,7 +3266,7 @@ class Brain:
             m.route = []
         self._note_last_step(grid, screen_id)
         self._watch_scene(grid)
-        action = self._experiment(level_map, grid, available) if self.scene is not None else self._advice(level_map, grid, available)
+        action = self._llm_decides(level_map, grid, available)
         m.last_from_advisor = action is not None
         if action is None:
             action = self.explorer.choose(level_map, screen, available)
@@ -3280,6 +3508,11 @@ class Brain:
             hypothesis = hypothesis._replace(test_action=click_on(target) if target is not None else None)
         if hypothesis is None or hypothesis.test_action is None:
             return None
+        if hypothesis.test_action[0] == 6 and (not any((a in available for a in (1, 2, 3, 4, 5)))):
+            self.goal_board.vote(self.goal_list, hypothesis.goal_choice)
+            self.goal_board.roles.update(hypothesis.roles)
+            self.stats['llm_tests_click_game'] += 1
+            return None
         level_map = self.world.levels.get(m.level)
         screen = level_map.screens.get(self._screen_id(grid)) if level_map is not None else None
         if self._already_known(hypothesis, controls) or (screen is not None and hypothesis.test_action in screen.results) or (hypothesis.test_action[0] == 6 and hypothesis.test_object in controls.dead_clicks):
@@ -3302,6 +3535,39 @@ class Brain:
         m.route, m.expected_screen = ([], None)
         self.stats['llm_actions'] += 1
         return hypothesis.test_action
+
+    def _llm_decides(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
+        """The LLM's action in the current mode (play / hypothesis / drive), or None: the brain decides."""
+        if self.player is not None:
+            return self._play(level_map, grid, available)
+        if self.scene is not None:
+            return self._experiment(level_map, grid, available)
+        return self._advice(level_map, grid, available)
+
+    def _play(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
+        """Play mode: the model's queued actions, asking it again when the queue is empty. None (the brain decides)
+        when there is no model or no usable answer, or the level is already solved (the brain replays the route)."""
+        m, player = (self.memory, self.player)
+        assert player is not None and m.level is not None
+        last = m.last_action if m.last_action not in (None, RESET_ACTION) else None
+        before = m.last_grid if last is not None else None
+        player.observe(grid, last, before, before is not None and self._screen_id(before) != self._screen_id(grid))
+        adviser = advisor()
+        if adviser is None or level_map.has_solution:
+            return None
+        for _attempt in range(2):
+            while player.queue:
+                action = player.legal(player.queue.pop(0), grid, available)
+                if action is not None:
+                    m.why, m.route, m.expected_screen = (player.last_why, [], None)
+                    self.stats['llm_actions'] += 1
+                    return action
+                self.stats['play_actions_refused'] += 1
+            self.stats['llm_questions'] += 1
+            if not player.ask(adviser, m.level, self.stats['deaths'], available, self.name):
+                self.stats['play_no_answer'] += 1
+                return None
+        return None
 
     def _advice(self, level_map: LevelMemory, grid: np.ndarray, available: list[int]) -> Action | None:
         """The advisor's next action, or None (advisor off, level already solved, no usable answer)."""
@@ -3387,6 +3653,8 @@ class Brain:
     def _on_death(self) -> None:
         m, world = (self.memory, self.world)
         self.stats['deaths'] += 1
+        if self.player is not None:
+            self.player.drop_plan()
         if self.lab.pending is not None:
             self.lab.record('the test action LOST A LIFE')
         if self.scene is not None:
@@ -3414,6 +3682,8 @@ class Brain:
     def _on_level_up(self, new_level: int) -> None:
         m, world = (self.memory, self.world)
         self.stats['level_ups'] += 1
+        if self.player is not None:
+            self.player.new_level()
         if self.lab.pending is not None:
             self.lab.record('the test action FINISHED THE LEVEL')
         if self.scene is not None and m.level is not None:

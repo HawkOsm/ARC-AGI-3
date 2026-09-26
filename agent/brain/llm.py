@@ -254,11 +254,18 @@ class Advisor:
         text = self._ask(question, tag, OBJECT_SYSTEM_PROMPT, OBJECT_SCHEMA)
         return parse_hypothesis(text, available) if text else None
 
+    def ask_parts(self, parts: list[dict], tag: str, system: str, schema: dict) -> str | None:
+        """A question made of text and image parts (play mode); None if there is no answer."""
+        if not self.available():
+            return None
+        with self._in_flight:
+            return self._send(parts, tag, system, schema)
+
     def _ask(self, prompt: str, tag: str = "", system: str | None = None, schema: dict | None = None) -> str | None:
         with self._in_flight:  # wait our turn; the timeout below starts when the request is sent
             return self._send(prompt, tag, system or SYSTEM_PROMPT, schema or PLAN_SCHEMA)
 
-    def _send(self, prompt: str, tag: str, system: str, schema: dict) -> str | None:
+    def _send(self, prompt: str | list[dict], tag: str, system: str, schema: dict) -> str | None:
         started = time.time()
         request_body: dict = {
             "model": self.model,

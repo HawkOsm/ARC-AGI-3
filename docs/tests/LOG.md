@@ -25,6 +25,9 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
   step 2 (0.697). First run was lucky (cn04 won a level for the first time, 4.76). Step 2 is also the most consistent
   per game (sc25 2/2/2 levels, vc33 2/2/2, tn36 1/1/1; step 5b sc25 2/0/1, tn36 1/1/0). Note: in step 2 every LLM
   click test was dropped (the missing-coordinates bug), so on click-only games step 2 = probes + the brain's explorer.
+- Step 5c (the LLM explains and picks goals but does not click in click-only games; build
+  `experiments/2026-09-26_hyp_step5c/`), three runs: 0.524 / 0.633 / 0.587 (8 / 10 / 10 levels), mean 0.582 — also
+  below step 2; "the LLM clicking" does not explain step 2's lead.
 - Verdict: NO GAIN — nothing after step 2 beats it on the 25-game score (run-to-run spread about ±0.1). The
   mechanisms work where they apply (ar25 selection, click tests with object names, event reasons in the replay);
   on the aggregate the LLM's own actions cost more than they find.
