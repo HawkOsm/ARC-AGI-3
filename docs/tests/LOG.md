@@ -4,6 +4,75 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-26 — Visibility: tests, Run Board, Agent Replay (owner: "I need to see what is going on")
+- Change: `tests/` (pytest, 29 tests: model, reader, advisor against a fake server, brain playing ls20/vc33; `make test`,
+  in `make ci` and GitHub CI). `eval/dashboard.py` → Run Board page. `agent/brain/trace.py` + `eval/trace_viewer.py` →
+  Agent Replay page (every step: screen, action, who chose it and why, what it did, LLM theory). The explorer now
+  records a reason per action (`WorkingMemory.why`), the advisor returns `Advice(plan, theory)`, LLM request logs
+  carry the game id. None of this changes a decision (tests + identity below).
+- Commands: `make test`; tests mutation-checked (removing the in-flight limit / accepting illegal plan actions each
+  turned a test red); `ARC3_TRACE_DIR=.claude/scratch/trace/brain_300 eval/run.py --swarm --max-actions 300 --seed 0`.
+- Result: 29/29 pass. Brain traces, 25 games x 300 actions (3.5 MB): share of actions that changed nothing —
+  ft09 82% (37 in a row), su15 67%, cd82 53%, tn36 51%, sb26 46%, sk48 44% (35 in a row); most games lose 2+ lives
+  (step counter) in 300 actions; 10 levels total (0.291).
+- Verdict: INFO — tools for the owner to decide the next step from what the agent visibly does.
+
+## 2026-09-26 — GPU dev run v4 (27B): thinking is unusable; no-thinking LLM ≈ brain at equal actions
+- Change: agent with advisor (pre-structured-output, pre-refactor; advisor-off play identical to the champion).
+  Arm `nothink` 5,400 s, then arm `think` (16,384 tokens, 1,200 s timeout) 2,700 s, same server.
+- Command: `notebooks/llm_dev/build.py --arm nothink:0:5400 --arm think:1:2700 --max-actions 1000`; brain reference:
+  `.claude/scratch/llm/kaggle/brain_at_same_actions.py` (each game replayed advisor-off, seed 0, same action count).
+- Result: server up in 270 s.
+  - `think`: 109 requests, **97 finish=length at 16,384 tokens**, median **685 s**/answer; 20 advised actions in 45 min; 0 levels.
+  - `nothink`: 3,525 requests, 0 errors, **2,057 (58%) finish=length at 1,024 tokens** (prose, no plan), median 46.5 s;
+    2,772 of 10,997 actions advised; 337-691 actions per game in 90 min.
+    **LLM 12 levels / 0.267 vs brain 11 levels / 0.292 at the same per-game actions** (n=1 seed). LLM-only levels:
+    cd82, s5i5, tn36 (3.57); r11l 0.92 vs 0.12. Brain-only: ar25, ls20; m0r0 4.76 vs 0.29 (efficiency).
+  GPU quota after v4: see `kaggle quota`.
+- Verdict: INFO — thinking mode is out (9/10 answers never finish). No-thinking plays about as well as the brain even
+  with most answers wasted; structured output (found locally the same day) should fix that. Next Kaggle run: schema
+  + compact JSON + `--language-model-only`, nothink only.
+
+## 2026-09-26 — Local dev LLM (RTX 4070 8 GB) + structured JSON answers
+- Change: `make llm-local-setup` / `make llm-local` / `make eval-llm`: vLLM 0.30.0 (same as Kaggle) in `.venv-llm/`,
+  model `cyankiwi/Qwen3.5-4B-AWQ-4bit@ef85d23beb` (4.0 GB, Apache-2.0; Qwen3.8 is built on Qwen3.5) in `models/`,
+  `--language-model-only --max-num-seqs 32 --max-num-batched-tokens 4096` (the defaults ran out of memory while
+  profiling CUDA graphs: tried to allocate 4.12 GiB). Server up in ~135 s; 5.7 of 8 GB used; KV cache 47,427 tokens.
+  Advisor: vLLM structured outputs (`response_format` json_schema: theory ≤400 chars + plan of 1-8
+  `ACTION[1-7]( x y)` strings), JSON-only instructions, and the prompt now says every action counts.
+- Command: `.claude/scratch/llm/local/smoke.py ls20,vc33,ft09[,sp80]` (first-screen prompts, thinking off)
+- Result: before: **3/3 answers hit the 1,024-token limit** reasoning in prose (counting hex digits) and never
+  produced a plan, 17.4 s each (~60 tokens/s single stream). After: **4/4 parse**, 2.1-6.0 s, 80-196 tokens,
+  finish=stop.
+- Verdict: INFO — local loop works; the same prose failure is likely on Kaggle without the schema (v4 was pushed
+  before this fix). Brain-only reference for the local run: swarm, seed 0, 200 actions: 0.251 / 6 levels.
+
+## 2026-09-26 — PLAYABLES step 1 (game mode, one click per kind, keys-first in mixed games): rejected
+- Change: `GameMode` from the offered actions; click candidates tagged with their item kind and a per-kind
+  click tally (`CLICK_TALLY_BY_KIND`); click priors x0.5 in MIXED games (`MIXED_MODE_CLICK_PRIOR_FACTOR`).
+  Both switches off = 50/50 identical to the champion (plumbing check).
+- Command: `eval/run.py --agent eval/champion/my_agent.py --variant kind=... --variant mixed=... --variant both=... --reps 30 --max-actions 1000`
+- Result (reference 0.574 / 16.80 levels per rep): kind −0.029 ± 0.053 / −0.33 ± 0.75 (no effect);
+  mixed **−0.064 ± 0.054** / +0.50 ± 0.60; both **−0.091 ± 0.067** / +0.07 ± 0.82. Per game (levels):
+  kind s5i5 +0.67, r11l +0.33, lp85 −0.40, sc25 −0.63; mixed bp35 −0.43, sc25 +0.63, sp80 +0.23.
+  Also measured first (`.claude/scratch/design/count_check.py`): every action counts on the scorecard,
+  including a legal click on background and a button the game doesn't offer (5/5 in all 25 games).
+- Verdict: ❌ both behaviours deleted (ablation rule); `GameMode` / `world.mode` kept (no decision uses it;
+  step 2 builds on it). After the revert: 50/50 identical to the champion again.
+
+## 2026-09-26 — Refactor: agent/brain in "Python like Java" (behaviour-identical)
+- Change: owner request. Dict beliefs → typed classes (`CounterMemory`, `AvatarBelief`, `ColourRoles`, `Kind`,
+  `Pattern`, `Item`, `ActionBeliefs`, `Rules`, `Goal`, `Death`, `WorkingMemory`), strings → enums (`Outcome`, `Role`),
+  tuples → records (`Action`, `ClickInfo`); free functions → classes with explicit dependencies (`ScreenReader`,
+  `FirstLook`, `CounterLearner`, `AvatarLearner`, `TouchLearner`, `ActionLearner`, `DeathJudge`, `ScreenFeatures`,
+  `GoalTracker`, `Explorer`, `PromptWriter`). mypy added to `make check` / CI (clean). explain.py, mask_check.py updated.
+- Commands: `eval/run.py --champion eval/champion/my_agent.py --reps 2 --max-actions 1000`; `make ci`;
+  mock-LLM run (5 games x 2 reps, 10% failures + 10% garbage); swarm timing x2 each.
+- Result: **50/50 runs identical** to the champion, 0 errors. CI: 11/11 interface, 9/9 masks, regression PASS 1.1812.
+  Mock LLM: 1,709 advised actions, 0 errors. Swarm (25 threads, 25,025 actions, same score 0.682): **107.8 / 109.6 s
+  vs champion 103.7 / 101.6 s → ~6% slower per action** (still ~4.3 ms/action).
+- Verdict: INFO — pure restructure; the 6% is accepted for now (the brain is stuck, not time-limited), profile later.
+
 ## 2026-09-26 — GPU dev run v3: server up, but every thinking answer ran out of tokens
 - Change: v2's sampler/CUDA_HOME fix. nvcc seen: system **12.8** (too old for sm_120), server 13.4 (wheelhouse).
 - Result: server up after 300 s. Games 477 s, aggregate **0.6816 / 17 levels** — the same as the local

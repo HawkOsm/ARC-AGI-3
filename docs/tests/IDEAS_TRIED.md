@@ -25,6 +25,9 @@ Kaggle or more data) · ⚠️ scorer-dependent
 | One click target per colour component (centroid-nearest cell) | ❌ | LOG 2026-09-25 click lattice | ft09/lp85 stall: the clickable unit is a sub-part of a connected component. |
 | Lattice click points inside large components + whole-grid refinement (stride 4→2→1) when a state is exhausted | ✅ | LOG 2026-09-25 click lattice | lp85 1.0→2.5 levels, tn36 0→1. ft09 still 0 (combinatorial). |
 | More action budget (1000 → 5000) with the pre-lattice floor | ➖ | LOG 2026-09-25 budget | 0.546 → 0.415, within noise: the agent is stuck, not budget-limited. |
+| "Free" probing with no-op / unavailable actions (owner's hypothesis) | ❌ (by measurement) | LOG 2026-09-26 count check | Every action counts on the scorecard, including background clicks and buttons the game doesn't offer (5/5 in all 25 games). |
+| Click chance learned per item kind (colour + shape) instead of per colour — "one click per kind before twins" (PLAYABLES step 1) | ➖ removed | LOG 2026-09-26 step 1, N=30 | Δscore −0.029 ± 0.053, Δlevels −0.33 ± 0.75. Splits evidence thinner than the per-colour tally. |
+| Mixed games (keys + clicks): halve click priors so keys go first (PLAYABLES step 1) | ❌ removed | LOG 2026-09-26 step 1, N=30 | Δscore **−0.064 ± 0.054** (levels +0.50 ± 0.60, n.s.): the tallies already learn fast; the prior only delays needed clicks (bp35 −0.43 levels). Both together −0.091 ± 0.067. |
 
 ## Beliefs about the game (owner's World design, 2026-09-25)
 

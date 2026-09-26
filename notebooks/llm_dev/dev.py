@@ -125,7 +125,10 @@ if not EXTERNAL_LLM:
         [sys.executable, "-m", "vllm.entrypoints.openai.api_server", "--model", str(MODEL_DIR),
          "--served-model-name", MODEL_NAME, "--host", "127.0.0.1", "--port", str(PORT),
          "--max-model-len", "32768", "--gpu-memory-utilization", "0.90", "--enable-prefix-caching",
-         "--reasoning-parser", "qwen3", "--trust-remote-code"],
+         "--reasoning-parser", "qwen3", "--trust-remote-code", "--language-model-only",
+         # compact JSON only: with free whitespace the model can loop on newlines until max_tokens
+         "--structured-outputs-config",
+         '{"backend": "xgrammar", "disable_any_whitespace": true, "reasoning_parser": "qwen3"}'],
         env=server_env, stdout=server_log, stderr=subprocess.STDOUT)
     t = time.time()
     up = False

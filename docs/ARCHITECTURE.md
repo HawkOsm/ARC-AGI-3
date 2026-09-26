@@ -52,15 +52,20 @@ learned during play; nothing is trained offline and nothing is keyed on a game's
 
 ## The files
 
+Code style: Python written like Java — typed classes, enums, one job per class, mypy as the
+compiler (rules in AGENT.md "Code style").
+
+
 | file | what it is | read it when |
 |---|---|---|
-| `agent/brain/brain.py` | the loop above | always first |
-| `agent/brain/world.py` | the belief containers (World, LevelMemory, Screen, Tally) | you wonder "where is X stored" |
-| `agent/brain/look.py` | screen reading: objects, changed blobs, first look | perception questions |
-| `agent/brain/learn.py` | writes beliefs: counters, avatar, touch roles, action effects | the agent believes something wrong |
-| `agent/brain/goals.py` | goal hypotheses from what changed when a level was won | goal questions |
-| `agent/brain/decide.py` | reads beliefs, picks the action (exploration frontier) | the agent does something dumb |
-| `agent/brain/llm.py` | **the LLM advisor**: prompt, HTTP client, answer parser, shared pause | LLM questions |
+| `agent/brain/brain.py` | `Brain`: the loop above (the orchestrator) | always first |
+| `agent/brain/world.py` | the model: typed belief classes (`World`, `AvatarBelief`, `LevelMemory`, `Screen`, `Goal`, ...), enums, `WorkingMemory` | you wonder "where is X stored" |
+| `agent/brain/look.py` | `ScreenReader` (objects, changed blobs), `FirstLook` | perception questions |
+| `agent/brain/learn.py` | the learners, only writers of beliefs: `CounterLearner`, `AvatarLearner`, `TouchLearner`, `ActionLearner`, `DeathJudge` | the agent believes something wrong |
+| `agent/brain/goals.py` | `ScreenFeatures`, `GoalTracker`: goals from what changed when a level was won | goal questions |
+| `agent/brain/decide.py` | `Explorer`: reads beliefs, picks the action (exploration frontier) | the agent does something dumb |
+| `agent/brain/llm.py` | **the LLM advisor**: `Advisor` (HTTP client, shared pause, in-flight limit), `PromptWriter`, `parse_plan` → `Advice(plan, theory)` | LLM questions |
+| `agent/brain/trace.py` | `Tracer`: writes every step (screen, action, who chose it and why, what happened) when `ARC3_TRACE_DIR` is set | "what is it actually doing?" |
 | `agent/brain/settings.py` | every tunable number, with its reason | tuning |
 | `agent/brain/kaggle_agent.py` | `MyAgent`: plugs the brain into Kaggle's framework + safety guards | crashes, threads, time/memory limits |
 | `scripts/build_submission.py` | glues the brain files into `agent/my_agent.py` (`MODULE_ORDER`) | adding a module |
@@ -69,6 +74,9 @@ learned during play; nothing is trained offline and nothing is keyed on a game's
 | `eval/kaggle_sim.py` | runs the real notebook against a local competition-mode gateway | "does it behave the same on Kaggle?" |
 | `eval/mock_llm.py` | fake LLM server (random legal plans, can fail or answer garbage) | testing advisor plumbing without a GPU |
 | `eval/explain.py` | plays a game for a while, then prints the World's beliefs in words | "what does it think this game is?" |
+| `eval/trace_viewer.py` | **Agent Replay** page: play back recorded games step by step (screen, action, reason, result, LLM theory) | watching the agent play |
+| `eval/dashboard.py` | **Run Board** page: every run, LLM answer health, LLM vs brain per game (`make dashboard`) | comparing runs |
+| `tests/` | pytest: model, reader, advisor (fake server), brain playing real games (`make test`) | changing code |
 | `notebooks/llm_prep/` | Kaggle CPU notebook: verifies the model mirror, builds the vLLM wheelhouse | LLM setup on Kaggle |
 
 ## The LLM part (Phase 3) — what runs where
@@ -95,8 +103,11 @@ learned during play; nothing is trained offline and nothing is keyed on a game's
   the whole game.
 - A plan is dropped on any surprise: death, level up, or an advised action that changed nothing.
   Three failed requests in a row pause the advisor for all games for 5 minutes.
-- Locally (8 GB laptop GPU) the 27B model cannot run, so local tests use `eval/mock_llm.py` for
-  plumbing only. **Play quality can only be measured in a Kaggle GPU notebook.**
+- Locally the 27B model cannot run on the 8 GB laptop GPU. Development uses **Qwen3.5-4B (AWQ)** on the same
+  vLLM 0.30 (`make llm-local`, then `make eval-llm`): same API, same failure modes, weaker play. The final quality
+  check is a Kaggle GPU run, and those need the owner's go-ahead each time.
+- Answers are forced into `{"theory": ..., "plan": [...]}` by vLLM structured output (compact JSON only); thinking
+  mode is off (on Kaggle 9/10 thinking answers never finished).
 
 Note: ROADMAP.md still says "no LLM-primary agent / LLM as rescue only". When the advisor is on,
 the LLM picks most actions on unsolved levels. That is the owner's 2026-09-26 decision (going
@@ -113,6 +124,8 @@ local LLM after the community research) and must pass the same promotion rule as
 | `experiments/<date>_<name>/` | frozen agent versions from past experiments | yes |
 | `models/` | local model weights (Qwen3.8-27B-FP8, ~31 GB) | no (gitignored) |
 | `.claude/scratch/<task>/` | scratch work, logs, pushed-notebook copies | no |
+| `.claude/scratch/trace/<run>/` | recorded games (one `.jsonl` per game) for the replay page | no |
+| `.claude/scratch/dashboard/` | the generated pages (Run Board, Agent Replay) | no |
 | `environment_files/` | the 25 public games, cached offline | no |
 
 ## Status (2026-09-26)
