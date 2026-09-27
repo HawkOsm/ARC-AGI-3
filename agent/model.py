@@ -23,9 +23,11 @@ import base64
 import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -81,16 +83,22 @@ reuse earlier mechanics, with changes). Every in-game action counts: clear every
 You act only through the `python` tool. Each call runs in a fresh process (stdlib only: collections, heapq,
 itertools, math, re, json, functools, statistics, copy, random, string, bisect, operator, fractions; 30 s limit;
 long output is cut). These variables are already defined in every call (do not import them):
-- `current_frame` (the board now) and `previous_frame` (before the last action): `.ascii` (one letter per cell,
-  colours: {COLOR_LEGEND}), `.level`, `.step`, `.shape`, `.segmentation`.
+- `current_frame` (the board now) and `previous_frame` (before the last action), each with:
+  `.rows` (list of 64 strings, one letter per cell: `current_frame.rows[r][c]`), `.at(r, c)` (one letter),
+  `.ascii` (ONE string, rows joined by newlines), `.level`, `.step`, `.shape` (rows, cols), `.segmentation`.
+  Colours: {COLOR_LEGEND}.
 - `.segmentation` = {{'nodes': [...], 'adjacency': [[i, j], ...]}}. Each node is one 4-connected same-colour object:
-  `id`, `color` (letter), `hash` (colour + shape, position-free: equal hash = same object), `pixels`,
-  `bbox` [row0, col0, row1, col1], `children` (ids of objects it fully encloses). Use it as your main view.
-- `history` (list of entries with `.action` and `.frame`; history[-1].frame is the current frame), `transitions`
-  (`.action`, `.before`, `.after`, `.result`), `last_action_result` (dict: board_changed, level_completed,
-  game_over, run_complete, levels_completed), `valid_actions`.
+  `id`, `color` (letter), `hash` (colour + shape, position-free: equal hash = same object), `size` (cell count),
+  `pixels` (list of its [row, col] cells), `bbox` [row0, col0, row1, col1], `children` (ids of objects it fully
+  encloses). Use it as your main view.
+- `history` (list of entries with `.action` (a string) and `.frame`; history[-1].frame is the current frame),
+  `transitions` (`.action`, `.before`, `.after`, `.result`), `last_action_result` (dict: board_changed,
+  level_completed, game_over, run_complete, levels_completed), `valid_actions` (list of names).
+- Already imported for you: collections, Counter, defaultdict, deque, heapq, itertools, math. Files are not available.
 - `action(actions)` executes real game actions and refreshes every variable above. Pass a list:
   ['UP'], ['LEFT', 'LEFT'], or [{{'action': 'MOUSE', 'row': 12, 'col': 30}}]. UP DOWN LEFT RIGHT SPACE MOUSE UNDO.
+  It returns a dict (executed, board_changed, level_completed, game_over, run_complete, levels_completed, ...).
+- Inspect and act in the SAME call when you can: every call costs time.
 
 How to play well:
 - Keep a compact world model: what the objects are, what each action does, what the goal seems to be, what is
@@ -109,8 +117,8 @@ How to play well:
 
 SANDBOX = r'''
 import builtins, contextlib, hashlib, io, json, resource, signal, sys
-ALLOWED = {"bisect", "collections", "copy", "fractions", "functools", "heapq", "itertools", "json", "math",
-           "operator", "random", "re", "statistics", "string"}
+ALLOWED = {"bisect", "collections", "copy", "fractions", "functools", "hashlib", "heapq", "itertools", "json",
+           "math", "operator", "random", "re", "statistics", "string"}
 _real_import = builtins.__import__
 def _import(name, globals=None, locals=None, fromlist=(), level=0):
     if name.split(".")[0] not in ALLOWED:
@@ -139,7 +147,8 @@ def segment(grid):
             top, left = min(rs), min(cs)
             shape = sorted((r - top, c - left) for r, c in cells)
             signature = hashlib.sha1(repr((v, shape)).encode()).hexdigest()[:12]
-            nodes.append({"id": cid, "color": CHARS[v], "hash": signature, "pixels": len(cells),
+            nodes.append({"id": cid, "color": CHARS[v], "hash": signature, "size": len(cells),
+                          "pixels": [[r, c] for r, c in sorted(cells)],
                           "bbox": [top, left, max(rs), max(cs)], "children": []})
             cells_of.append(cells)
     adj = set()
@@ -160,7 +169,7 @@ def segment(grid):
         outer = neighbours.get(n["id"], set())
         if r0 > 0 and c0 > 0 and r1 < h - 1 and c1 < w - 1 and len(outer) == 1:
             parent = next(iter(outer))
-            if nodes[parent]["pixels"] > n["pixels"]:
+            if nodes[parent]["size"] > n["size"]:
                 nodes[parent]["children"].append(n["id"])
     return {"nodes": nodes, "adjacency": sorted([a, b] for a, b in adj)}
 
@@ -170,8 +179,13 @@ class Frame:
         self.shape = (len(self.grid), len(self.grid[0]) if self.grid else 0)
         self._seg = None
     @property
+    def rows(self):
+        return ["".join(CHARS[v] for v in row) for row in self.grid]
+    @property
     def ascii(self):
-        return "\n".join("".join(CHARS[v] for v in row) for row in self.grid)
+        return "\n".join(self.rows)
+    def at(self, row, col):
+        return CHARS[self.grid[row][col]]
     @property
     def segmentation(self):
         if self._seg is None:
@@ -183,6 +197,8 @@ class Frame:
 class Entry:
     def __init__(self, action, frame):
         self.action, self.frame = action, frame
+    def __getattr__(self, name):  # entry.ascii etc. mean the entry's frame
+        return getattr(self.__dict__["frame"], name)
     def __repr__(self):
         return f"<Entry {self.action} -> {self.frame!r}>"
 
@@ -196,7 +212,13 @@ def _send(msg):
 def _recv():
     return json.loads(_proto_in.readline())
 
-env = {"__builtins__": dict(vars(builtins), __import__=_import)}
+def _no_files(*args, **kwargs):
+    raise PermissionError("files are not available here: keep what you need in variables")
+import collections, heapq, itertools, math
+env = {"__builtins__": dict(vars(builtins), __import__=_import, open=_no_files),
+       # preloaded: the model's code uses these without importing them (63 NameErrors on Kaggle, run C)
+       "collections": collections, "Counter": collections.Counter, "defaultdict": collections.defaultdict,
+       "deque": collections.deque, "heapq": heapq, "itertools": itertools, "math": math}
 def _load(state):
     history = [Entry(e["action"], Frame(e["frame"])) for e in state["history"]]
     env["history"] = history
@@ -244,8 +266,10 @@ class Sandbox:
     @staticmethod
     def run(code: str, state: dict[str, Any], act: Callable[[list[Any]], tuple[dict[str, Any], dict[str, Any]]],
             timeout_s: int) -> dict[str, Any]:
+        workdir = tempfile.mkdtemp(prefix="agent_sandbox_")  # its own folder, removed after the call
         process = subprocess.Popen([sys.executable, "-I", "-S", "-c", SANDBOX], stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+                                   cwd=workdir)
         assert process.stdin is not None and process.stdout is not None
         killer = threading.Timer(timeout_s + 10, process.kill)  # alarm failed to stop it: kill the process
         killer.start()
@@ -271,6 +295,7 @@ class Sandbox:
         finally:
             killer.cancel()
             process.kill()
+            shutil.rmtree(workdir, ignore_errors=True)
 
 
 # ── the game ────────────────────────────────────────────────────────────────

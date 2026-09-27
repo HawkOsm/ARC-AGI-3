@@ -26,13 +26,13 @@ def test_sandbox_sees_the_frame_calls_actions_and_blocks_imports():
                                                                   result={"board_changed": True})
 
     code = ("nodes = current_frame.segmentation['nodes']\n"
-            "print([(n['color'], n['pixels'], n['bbox']) for n in nodes])\n"
+            "print([(n['color'], n['size'], n['bbox'], n['pixels'][:1]) for n in nodes])\n"
             "r = action(['RIGHT'])\n"
             "print(r['board_changed'], current_frame.ascii.splitlines()[1], previous_frame is not None)\n"
             "result = len(history)")
     out = Sandbox.run(code, _state(("", grid)), act, 10)
     assert out["error"] is None, out
-    assert "('b', 2, [1, 1, 1, 2])" in out["stdout"]
+    assert "('b', 2, [1, 1, 1, 2], [[1, 1]])" in out["stdout"]
     assert "True WWbb True" in out["stdout"]  # after action(): the refreshed frame, and a previous frame exists
     assert calls == [["RIGHT"]] and out["result"] == "2"
     blocked = Sandbox.run("import os", _state(("", grid)), act, 10)
@@ -42,7 +42,7 @@ def test_sandbox_sees_the_frame_calls_actions_and_blocks_imports():
 
 
 def test_conversation_keeps_notes_newest_image_and_fits_its_budget():
-    c = Conversation(budget_tokens=2000)
+    c = Conversation(budget_tokens=3000)
     c.learn_notes("Some thinking.\nWorld model: a blue block moves right.\nPlan: click the red button.\n")
     assert c.notes == {"World model": "a blue block moves right.", "Plan": "click the red button."}
     image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
@@ -50,7 +50,7 @@ def test_conversation_keeps_notes_newest_image_and_fits_its_budget():
         c.add({"role": "user", "content": [{"type": "text", "text": f"turn {turn} " + "x" * 300}, image]})
         c.add({"role": "assistant", "content": "ok " * 100})
     users = [m for m in c.messages if m["role"] == "user"]
-    assert c.messages[0]["role"] == "system" and c._size() <= 2000
+    assert c.messages[0]["role"] == "system" and c._size() <= 3000
     assert isinstance(users[-1]["content"], list) and all(isinstance(u["content"], str) for u in users[:-1])
     assert "turn 29" in users[-1]["content"][0]["text"]
 
@@ -107,3 +107,14 @@ def test_screen_setting_puts_letters_or_an_image_in_the_message_and_old_screens_
     c.add({"role": "user", "content": agent._user_content()})
     assert SCREEN_TEXT_HEADER not in c.messages[1]["content"]  # the older message lost its letter grid
     assert any(p["text"].startswith(SCREEN_TEXT_HEADER) for p in c.messages[2]["content"])
+
+
+def test_sandbox_helpers_rows_entry_frames_and_no_files():
+    grid = [[0, 8], [9, 5]]
+    code = ("print(current_frame.rows[1][0], current_frame.at(0, 1), history[-1].ascii.splitlines()[0])\n"
+            "print(Counter(current_frame.rows[0]), len(deque([1, 2])), int(math.sqrt(16)))\n"
+            "import hashlib\nprint(hashlib.md5(b'x').hexdigest()[:4])\n"
+            "open('f_snap.txt', 'w')")
+    out = Sandbox.run(code, _state(("", grid)), lambda a: ({}, _state(("", grid))), 10)
+    assert "b R WR" in out["stdout"] and "Counter({'W': 1, 'R': 1}) 2 4" in out["stdout"]
+    assert "9dd4" in out["stdout"] and "PermissionError" in out["error"]

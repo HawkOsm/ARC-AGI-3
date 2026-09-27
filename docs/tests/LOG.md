@@ -4,6 +4,25 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-27 — Kaggle run C: our `agent/model.py` on Flash-Next, context 12K, prefix cache on
+- Change: first Kaggle run of our own agent (`notebooks/agent/build.py --model flashnext --context 12000
+  --prefix-cache`, pushed by the owner as `hawkosm/arc3-agent`). Differences from run A: our rewrite of the agent,
+  12K conversation budget (run A ~20K per call), prefix cache on. Same model, cache size (5 GiB), 130 min per game.
+- Result: **1.11 / 11 levels** (run A: 9.81 / 38). Server ready after 1122 s (normal; the `server_start_s` field in
+  results.json wrongly held the whole session, fixed). Serving: 4.8 requests running at once (run A 3.1), 19.9 waiting
+  (21.5), 324 generated tokens/s (250): the shorter context helped ~+30%. **Prefix cache hit rate 0%** — the cache
+  stays ~92% full, so nothing survives to be reused: no gain. The agent was the problem: 1780 model calls but only 609
+  turns (2.9 calls per turn; run A ~1.0) and 1515 actions (run A 3900); **357 of 1780 tool calls errored (20%;
+  run A 5%)** — our sandbox interface: `len(node['pixels'])` on a count (75), `Counter` not imported (63), string
+  indexing of `.ascii` (58), `hashlib` blocked (41), `entry.ascii` (9). The model also wrote a file (`f_snap.txt`)
+  into the notebook's folder: the sandbox allowed `open()` and ran in the working folder.
+- Fixes (local, tests 9/9): `pixels` = list of [row, col] cells + `size`; `.rows` and `.at(r, c)`; history entries
+  forward frame attributes; Counter / defaultdict / deque / heapq / itertools / math preloaded; hashlib allowed;
+  `open()` blocked and each call runs in its own temp folder; prompt spells out shapes and says to inspect and act
+  in the same call.
+- Verdict: WORSE (1.11 vs 9.81) — caused by our agent's interface, not the throughput settings; re-run needed after
+  the fixes. Prefix cache: NO GAIN at this cache size.
+
 ## 2026-09-27 — Our Kaggle notebook for `agent/model.py`, with the throughput levers as settings (built, not run)
 - Change: `notebooks/agent/runner.py` + `build.py`: serve the model (`flashnext` = the public Duck fork's serving
   script, unchanged, tuned via TAAF_VLLM_*; `qwen27b` = our vLLM wheelhouse + tool calls + vision), play every game

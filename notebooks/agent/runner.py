@@ -131,7 +131,8 @@ def serve_qwen27b() -> tuple[str, str]:
 
 serve_started = time.time()
 BASE_URL, MODEL_NAME = serve_flashnext() if SETTINGS["model"] == "flashnext" else serve_qwen27b()
-print(f"model server ready: {MODEL_NAME} at {BASE_URL} after {time.time() - serve_started:.0f} s", flush=True)
+SERVER_START_S = round(time.time() - serve_started)
+print(f"model server ready: {MODEL_NAME} at {BASE_URL} after {SERVER_START_S} s", flush=True)
 
 # %%
 # The agent: agent/model.py, embedded by build.py; its settings are AGENT_* environment variables.
@@ -168,7 +169,8 @@ print(f"playing {len(game_ids)} games, {parallel} at once, {minutes:.0f} min eac
 results = agent_model.play_games(arcade, game_ids, minutes, parallel, agent_model.Config())
 mean = sum(r["score"] for r in results.values()) / max(1, len(results))
 summary = {"settings": SETTINGS, "mean_score": mean, "total_levels": sum(r["levels"] for r in results.values()),
-           "minutes_per_game": minutes, "server_start_s": round(time.time() - serve_started), "games": results}
+           "minutes_per_game": minutes, "server_start_s": SERVER_START_S,
+           "session_s": round(time.time() - NOTEBOOK_START), "games": results}
 (WORKING_DIR / "results.json").write_text(json.dumps(summary, indent=1))
 print(f"mean score {mean:.2f}, levels {summary['total_levels']}", flush=True)
 if not TRUE_SUBMISSION:  # Save & Run expects a valid file; a scored run is scored by the game server instead
