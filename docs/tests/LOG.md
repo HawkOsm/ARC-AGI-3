@@ -4,6 +4,22 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-27 — One-file Duck (`agent/duck.py`); the brain-first codebase deleted
+- Change: owner decision "LLM first, algorithms later; simplify". New `agent/duck.py` (~620 lines): our own rewrite
+  of the Duck design (python tool whose code calls `action(...)`, segmentation view, before/after frames, the model's
+  world-model notes carried between turns, context fitting that never drops the newest user message, only the newest
+  screen image kept). Deleted: `agent/brain/` + `agent/my_agent.py`, `eval/` (runners, dashboard, replay viewer,
+  champion), `experiments/`, `vendor/duck/`, `scripts/`, old tests, `notebooks/duck_hints`, ROADMAP / STARTER_README /
+  design docs. Kept: research + test docs, `notebooks/llm_prep` + `llm_dev` (to be pointed at duck.py),
+  `notebooks/duck_repro` (Kaggle template). Tracked Python: ~13,000 lines of our own code -> ~620 (+ 100 of tests).
+- Command: `make check test`; `DUCK_TRACE_DIR=.claude/scratch/duck/ours_ar25 .venv/bin/python -m agent.duck --games ar25
+  --minutes 10 --concurrency 1` against `make llm-local` (Qwen3.5-4B, 32K, vision + tool calls).
+- Result: 5/5 tests pass (sandbox actions + import block + time limit, context fitting, game wrapper, a whole turn with
+  a fake model on ls20 — which caught a bug: batched actions were summarised as only the last one). ar25 on the 4B:
+  14 turns, 24 tool calls, 13 actions, 0 request errors, 0 levels, official scorecard read back. The 4B wrote no
+  "World model:" lines (its reasoning stays in the thinking channel).
+- Verdict: INFO — plumbing works end to end locally; the score question needs the Kaggle model.
+
 ## 2026-09-27 — Kaggle run A: the public Duck (Qwen3.8-Flash-Next NVFP4) unchanged — our baseline for the Duck
 - Change: none — `notebooks/duck_repro` = the public notebook `keithtyser/duck-qwen3-8-flash-next-nvfp4-mtp` (Tufa Labs
   Duck harness, MIT) pushed as `hawkosm/duck-flashnext-repro` (owner OK). RTX PRO 6000, 25 public games at once,

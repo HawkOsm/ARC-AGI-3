@@ -4,19 +4,21 @@ Third-party code and ideas this repo uses or was shaped by, and exactly how.
 
 ## Code in this repo
 
-**ARC Prize Kaggle starter kit** — [arcprize/ARC-AGI-3-Kaggle-Starter](https://github.com/arcprize/ARC-AGI-3-Kaggle-Starter)
-@ `eeb1535` (cloned 2026-09-25). `Makefile`, `scripts/play_local.py`, `scripts/build_notebook.py`,
-`scripts/slim_framework.py`, `notebooks/kernel-metadata.json` and the original random
-`agent/my_agent.py` (frozen at `experiments/2026-09-25_random_baseline/my_agent.py`) come from it.
-Local modifications, each commented in place: uv-managed venv, `~/.kaggle/access_token` fallback,
-pinned framework commit + `arc-agi`/`arcengine`/`numpy` versions matching Kaggle's runtime,
-`AGENT=` override for the notebook build, CPU accelerator, project make targets. Its README is kept
-as [`docs/STARTER_README.md`](docs/STARTER_README.md).
+**The Duck — Tufa Labs** (ARC Prize 2026 ARC-AGI-3 Milestone #1 winner; Harold Bessis, Jeroen Cottaar, Isaiah
+Pressman, Andries Smit, Michal Tesnar, Stefano Viel). Source read from the Kaggle dataset
+[`jeroencottaar/taaf-kaggle-source-share`](https://www.kaggle.com/datasets/jeroencottaar/taaf-kaggle-source-share)
+(licence **MIT** as listed on the dataset), 2026-09-26/27. `agent/duck.py` is **our own rewrite of its design**:
+one `python` tool whose code calls `action(...)`, a segmentation view of the screen, before/after frames, the
+model-written world-model notes carried between turns, context eviction, the prompt's playing advice (HUD bars are
+not puzzle pieces; probe when unsure; search and batch when the goal is clear). No code was copied; the
+segmentation, sandbox, prompt text and loop were written from scratch and are simpler than theirs.
 
-**ARC-AGI-3-Agents framework** — [arcprize/ARC-AGI-3-Agents](https://github.com/arcprize/ARC-AGI-3-Agents),
-vendored by `make setup` into `vendor/` (gitignored), pinned to `135f20a`. `agent/brain/kaggle_agent.py`
-subclasses its `Agent` and overrides `do_action_request`/`take_action`/`append_frame` to harden it
-(see AGENT.md "Verified interface facts").
+**Public notebook** [`keithtyser/duck-qwen3-8-flash-next-nvfp4-mtp`](https://www.kaggle.com/code/keithtyser/duck-qwen3-8-flash-next-nvfp4-mtp)
+(a fork of Tufa Labs' notebook serving Qwen3.8-Flash-Next NVFP4) — copied unchanged into `notebooks/duck_repro/`
+as our Kaggle baseline and template.
+
+**ARC Prize Kaggle starter kit** — [arcprize/ARC-AGI-3-Kaggle-Starter](https://github.com/arcprize/ARC-AGI-3-Kaggle-Starter)
+@ `eeb1535`: the project began from it (2026-09-25); the `Makefile` has since been rewritten and its scripts removed.
 
 ## Studied, not shipped
 
@@ -39,17 +41,13 @@ studied later, update this entry with what was taken.
 **Architecture brief** (from the project owner, describing a team that iterated 79+ versions on
 this competition): volatile-cell-masked state hashing, a learned transition model with verified
 BFS planning, object-centric avatar identification, no-op/undo interface learning,
-programmatic-first with LLM-as-rescue. `agent/brain/` implements the first four; see AGENT.md for
-where the implementation deviates and why.
+programmatic-first with LLM-as-rescue. The former `agent/brain/` (deleted 2026-09-27, in git history)
+implemented the first four; the project has since moved to an LLM-first design (`agent/duck.py`).
 
-**"The Duck" — Tufa Labs, 1st place ARC-AGI-3 Milestone #1** ([arcprize.org blog](https://arcprize.org/blog/arc-prize-2026-milestone-1);
-harness repo cloned to `.claude/scratch/llm/duck-harness`, **no license**, so nothing is copied). Read
-2026-09-26 for serving setup only: running one vLLM OpenAI-compatible server inside the Kaggle notebook
-from an offline wheelhouse installed with `--target`, attached model snapshot, prefix caching,
-`--reasoning-parser qwen3`, Qwen's thinking-mode sampling (temperature 0.6, top-p 0.95). Our
-`notebooks/llm_prep/`, `notebooks/llm_dev/` and `agent/brain/llm.py` were written from scratch; the
-agent design (brain in charge, LLM proposes short plans) is ours, not theirs (theirs: the LLM writes
-and runs Python in a REPL).
+**Tufa Labs' harness repo** (cloned 2026-09-26 to `.claude/scratch/llm/duck-harness`; that GitHub copy carries no
+licence file) was read for its serving setup: one vLLM OpenAI-compatible server inside the Kaggle notebook from an
+offline wheelhouse installed with `--target`, prefix caching, `--reasoning-parser qwen3`, thinking-mode sampling
+(temperature 0.6, top-p 0.95). `notebooks/llm_prep/` and `notebooks/llm_dev/` were written from scratch.
 
 **vLLM recipe for Qwen3.8-27B** ([recipes.vllm.ai](https://recipes.vllm.ai/Qwen/Qwen3.8-27B), read
 2026-09-26): vLLM ≥ 0.17 supports the model; the RTX PRO 6000 / Blackwell notes informed the serve flags.

@@ -66,3 +66,14 @@ Kaggle or more data) · ⚠️ scorer-dependent
 | Qwen thinking mode as the advisor | ❌ | LOG v3, v4 | 27B: 9/10 answers never finish even at 16,384 tokens (685 s median). |
 | LLM drives (stateless prompt: beliefs + 16 steps + hex screen), brain only on solved levels / failures | ❌ | LOG v5 | 27B with reliable JSON answers: 1 level vs brain 17 at equal actions; 4B locally 2 vs 6. Plans mostly one key repeated. |
 | Structured JSON output (vLLM json_schema, compact) | ✅ plumbing | LOG local + v5 | 3/3 → 0% prose failures; 9,292/9,292 clean answers on Kaggle. |
+
+## Who decides: brain vs LLM (2026-09-26/27)
+
+| idea | verdict | evidence | notes |
+|---|---|---|---|
+| LLM picks every action from a hex screen (drive mode) | ❌ | LOG 2026-09-26 (Kaggle v5, local 4B) | Worse than the brain alone (4B: 2 vs 6 levels). |
+| Brain in charge; LLM explains objects and picks a goal from the brain's shape list; brain steers (hypothesis mode, step 2) | ✅ then superseded | LOG 2026-09-26 | 0.697 / 10–12 levels over 3 runs vs brain 0.251 / 6. |
+| + control modes, level lessons, surprises → LLM, several targets (step 3); own goals, click tests by object (4/4b); event-based asking (5/5b/5c) | ➖ | LOG 2026-09-26 | None beat step 2 (0.38–0.62). The LLM's own clicks cost more than they found. |
+| Brain findings as `brain_hints` for the Duck's model | ⏳ dropped | LOG 2026-09-27 | Built and verified in the sandbox; Kaggle A/B not run; brain deleted (owner: LLM first). |
+| **LLM writes Python that plays (the Duck, Tufa Labs)** | ✅ | LOG 2026-09-27 run A | Public notebook unchanged: 9.81 / 38 levels on the 25 public games. Our rewrite: `agent/duck.py`. |
+
