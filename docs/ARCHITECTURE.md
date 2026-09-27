@@ -37,6 +37,12 @@ algorithms are added only where the model measurably needs them.
 | `Agent` | plays one game: turns, the per-turn prompt, traces (`AGENT_TRACE_DIR`) |
 | `play_games`, `main` | many games in parallel on one scorecard; official scores per game |
 
+Kaggle: `notebooks/agent/build.py` builds our notebook (`runner.py` + the embedded `agent/model.py`). It serves
+the chosen model (`--model flashnext`: the public Duck fork's pinned Flash-Next serving, tuned through its
+`TAAF_VLLM_*` variables; `--model qwen27b`: our own vLLM wheelhouse with tool calls and vision), plays every game at
+once, and writes `results.json` + traces (offline public games) or plays Kaggle's game server (scored run). The
+throughput levers are build flags: `--context`, `--prefix-cache`, `--max-seqs`, `--kv-cache-bytes`, `--kv-cache-dtype`.
+
 Local development: `make llm-local` serves a 4B model (vision, tool calls, 32K context) on an 8 GB laptop GPU —
 good for checking the plumbing, too weak to judge strategy. Kaggle (RTX PRO 6000) runs the real model; see
 `notebooks/duck_repro/` for the serving setup of the public ~5-point notebook.

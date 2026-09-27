@@ -641,19 +641,31 @@ def play_games(arcade: Any, game_ids: list[str], minutes: float, concurrency: in
     return results
 
 
+def open_arcade(mode: str, environments_dir: str = "environment_files") -> Any:
+    """The games: local files (offline), or Kaggle's game server during a scored run (competition: one scorecard,
+    each game once; the server's address comes from ARC_BASE_URL)."""
+    import logging
+
+    import arc_agi
+    logging.disable(logging.WARNING)
+    if mode == "competition":
+        return arc_agi.Arcade(operation_mode=arc_agi.OperationMode.COMPETITION,
+                              arc_base_url=os.environ.get("ARC_BASE_URL", "http://gateway:8001/"),
+                              arc_api_key=os.environ.get("ARC_API_KEY", ""), environments_dir="")
+    return arc_agi.Arcade(operation_mode=arc_agi.OperationMode.OFFLINE, environments_dir=environments_dir)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--games", default="ar25", help="'all' or comma-separated short ids")
     ap.add_argument("--minutes", type=float, default=10.0, help="time per game")
     ap.add_argument("--max-actions", type=int, default=0, help="action cap per game (0 = none)")
     ap.add_argument("--concurrency", type=int, default=2)
+    ap.add_argument("--mode", choices=["offline", "competition"], default="offline")
     ap.add_argument("--environments", default="environment_files")
+    ap.add_argument("--out", default="", help="write the per-game results as JSON here")
     args = ap.parse_args()
-    import logging
-
-    import arc_agi
-    logging.disable(logging.WARNING)
-    arcade = arc_agi.Arcade(operation_mode=arc_agi.OperationMode.OFFLINE, environments_dir=args.environments)
+    arcade = open_arcade(args.mode, args.environments)
     ids = sorted(e.game_id for e in arcade.available_environments)
     if args.games != "all":
         ids = [i for i in ids if i.split("-")[0] in args.games.split(",")]
@@ -664,6 +676,8 @@ def main() -> int:
     mean = sum(r["score"] for r in results.values()) / max(1, len(results))
     print(f"mean score {mean:.2f} over {len(results)} games, total levels "
           f"{sum(r['levels'] for r in results.values())}, {time.time() - started:.0f} s")
+    if args.out:
+        Path(args.out).write_text(json.dumps({"mean_score": mean, "games": results}, indent=1))
     return 0
 
 

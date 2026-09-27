@@ -4,6 +4,20 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-27 — Our Kaggle notebook for `agent/model.py`, with the throughput levers as settings (built, not run)
+- Change: `notebooks/agent/runner.py` + `build.py`: serve the model (`flashnext` = the public Duck fork's serving
+  script, unchanged, tuned via TAAF_VLLM_*; `qwen27b` = our vLLM wheelhouse + tool calls + vision), play every game
+  at once with `agent/model.py`, write `results.json` + traces; scored runs play Kaggle's game server (one scorecard,
+  per-game time shrunk to fit 9 h if there are more games than parallel slots). `agent/model.py` gained
+  `open_arcade(mode)` (offline / competition) and `--out`. Settings: `--context` (default 12000), `--prefix-cache`
+  (default on), `--model`, `--max-seqs` 28, `--kv-cache-bytes` (default 5 GiB as run A), `--kv-cache-dtype`.
+- Command: local dry run of the notebook's agent + play cells against `make llm-local` (ls20 + vc33, 1 min each,
+  Kaggle paths mapped to scratch folders); `make test`.
+- Result: both games played in parallel; `results.json`, traces and the placeholder `submission.parquet` written.
+  The dry run caught a crash (division by zero) when the arcade lists no games; now a clear error. 8/8 tests pass
+  (incl. both notebook variants building with the right inputs).
+- Verdict: INFO — ready to push; no Kaggle run started (owner: collect ideas first).
+
 ## 2026-09-27 — Analysis of Kaggle run A (no new run): where the public Duck's time and actions went
 - Command: `python3 .claude/scratch/duck/analysis/analyze_run.py .claude/scratch/duck/kaggle_a1` (events, transcripts,
   benchmark.json, vLLM metrics and log of run A).

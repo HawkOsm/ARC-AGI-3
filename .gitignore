@@ -30,3 +30,4 @@ eval/results/
 models/
 .venv-llm/
 kaggle_datasets/
+notebooks/agent/build/
