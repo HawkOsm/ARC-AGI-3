@@ -7,7 +7,7 @@ Instructions for any AI agent (Claude Code, `agy`, or otherwise) working in this
 An agent for Kaggle's **ARC Prize 2026 — ARC-AGI-3** (deadline 2026-11-02): play unseen turn-based grid games
 (64×64, 16 colours) with no instructions, scored per level by action efficiency against human baselines.
 
-**The agent is one file: `agent/duck.py`** — an LLM that plays by writing Python (the idea of Tufa Labs' "Duck",
+**The agent is one file: `agent/model.py`** — an LLM that plays by writing Python (the idea of Tufa Labs' "Duck",
 the Milestone #1 winner; our own rewrite, see CREDITS.md). LLM first, algorithms later: code is added only where
 the model measurably needs it. Map: docs/ARCHITECTURE.md.
 
@@ -20,7 +20,7 @@ public games (Kaggle run A, 2026-09-27). Our deleted brain-first agent reached 1
 make setup games           # venv + pinned arc-agi, then the 25 public game sources
 make llm-local-setup       # once: vLLM + the local 4B dev model
 make llm-local             # serve it (vision + tool calls + 32K context)
-make play GAME=ar25 MINUTES=10     # play with agent/duck.py; traces in .claude/scratch/duck/play/
+make play GAME=ar25 MINUTES=10     # play with agent/model.py; traces in .claude/scratch/agent/play/
 make check test            # ruff + mypy, pytest
 ```
 
@@ -89,7 +89,7 @@ Checked by code or by reading `arc_agi`/`arcengine` (2026-09-25), not assumed. R
 
 - **Typed classes, not loose dicts** for our own data (`@dataclass(slots=True)`); dicts only where JSON goes in
   or out (model messages, sandbox state).
-- **One job per class** (`Sandbox`, `Game`, `Model`, `Conversation`, `Duck`), dependencies passed in.
+- **One job per class** (`Sandbox`, `Game`, `LLM`, `Conversation`, `Agent`), dependencies passed in.
 - **mypy is the compiler** (`make check`); only the standard library + numpy in `agent/` (Kaggle ships nothing
   else we can rely on).
 

@@ -1,4 +1,4 @@
-"""DUCK — the whole agent in one file: an LLM that plays ARC-AGI-3 by writing Python.
+"""MODEL — the whole agent in one file: an LLM that plays ARC-AGI-3 by writing Python.
 
 Idea: Tufa Labs' "Duck" harness (ARC Prize 2026 Milestone #1 winner, MIT; outline in docs/research/DUCK_HARNESS.md).
 This is our own small rewrite of it, not their code.
@@ -13,8 +13,8 @@ This is our own small rewrite of it, not their code.
     memory: the model writes "World model: / Goal model: / Action model: / Plan: / Cross-level notes:" lines; they are
       carried into every later prompt. Old messages are dropped when the context fills; only the newest image is kept.
 
-Run locally:  .venv/bin/python -m agent.duck --games ar25 --minutes 10
-              (model server: make llm-local LLM_VISION=1 LLM_TOOLS=1 LLM_MAX_LEN=32768 LLM_GPU_UTIL=0.93)
+Run locally:  .venv/bin/python -m agent.model --games ar25 --minutes 10
+              (start the model server first: make llm-local)
 """
 from __future__ import annotations
 
@@ -42,21 +42,21 @@ import numpy as np
 
 @dataclass(frozen=True, slots=True)
 class Config:
-    """Everything tunable, read from the environment (DUCK_*) with the Duck's own defaults."""
-    base_url: str = os.environ.get("DUCK_BASE_URL", "http://127.0.0.1:8000/v1")
-    model: str = os.environ.get("DUCK_MODEL", "qwen")
-    context_tokens: int = int(os.environ.get("DUCK_CONTEXT", "32768"))
-    thinking: bool = os.environ.get("DUCK_THINKING", "1") == "1"
+    """Everything tunable, read from the environment (AGENT_*) with the original Duck's defaults."""
+    base_url: str = os.environ.get("AGENT_BASE_URL", "http://127.0.0.1:8000/v1")
+    model: str = os.environ.get("AGENT_MODEL", "qwen")
+    context_tokens: int = int(os.environ.get("AGENT_CONTEXT", "32768"))
+    thinking: bool = os.environ.get("AGENT_THINKING", "1") == "1"
     temperature: float = 0.6
     top_p: float = 0.95
     top_k: int = 20
-    request_timeout_s: float = float(os.environ.get("DUCK_REQUEST_TIMEOUT", "900"))
-    max_tokens: int = int(os.environ.get("DUCK_MAX_TOKENS", "0"))  # per reply, thinking included; 0 = no cap
+    request_timeout_s: float = float(os.environ.get("AGENT_REQUEST_TIMEOUT", "900"))
+    max_tokens: int = int(os.environ.get("AGENT_MAX_TOKENS", "0"))  # per reply, thinking included; 0 = no cap
     tool_timeout_s: int = 30  # one python call
     tool_output_chars: int = 4000  # what the model sees of one call's output
     max_tool_calls: int = 12  # per turn, before the turn is cut
-    image_upscale: int = int(os.environ.get("DUCK_IMAGE_UPSCALE", "4"))  # 0 = no image
-    trace_dir: str = os.environ.get("DUCK_TRACE_DIR", "")
+    image_upscale: int = int(os.environ.get("AGENT_IMAGE_UPSCALE", "4"))  # 0 = no image
+    trace_dir: str = os.environ.get("AGENT_TRACE_DIR", "")
 
 
 ACTION_NAMES = {1: "UP", 2: "DOWN", 3: "LEFT", 4: "RIGHT", 5: "SPACE", 6: "MOUSE", 7: "UNDO"}
@@ -276,7 +276,7 @@ class Sandbox:
 
 @dataclass(slots=True)
 class Game:
-    """One game through arc_agi: its frames, and actions in the Duck's names."""
+    """One game through arc_agi: its frames, and actions in the names the model uses."""
     env: Any
     game_id: str
     frames: list[tuple[str, list[list[int]], int, int]] = field(default_factory=list)  # (action, grid, level, step)
@@ -342,7 +342,7 @@ PYTHON_TOOL = {"type": "function", "function": {
 TOOL_MARKUP = re.compile(r"<function=python>\s*<parameter=code>\s*(.*?)\s*</parameter>", re.S)
 
 
-class Model:
+class LLM:
     """OpenAI-compatible chat with the python tool (vLLM: --tool-call-parser qwen3_coder --reasoning-parser qwen3)."""
 
     def __init__(self, config: Config) -> None:
@@ -438,10 +438,10 @@ class Conversation:
 
 
 @dataclass(slots=True)
-class Duck:
+class Agent:
     """Plays one game: turns until the game is won, the time is up or the action cap is reached."""
     game: Game
-    model: Model
+    llm: LLM
     config: Config
     deadline: float
     max_actions: int | None = None
@@ -483,7 +483,7 @@ class Duck:
         for _call in range(self.config.max_tool_calls):
             if self.done():
                 return
-            reply = self.model.chat(self.conversation.messages)
+            reply = self.llm.chat(self.conversation.messages)
             self.tokens += int(reply["usage"].get("completion_tokens", 0) or 0)
             if reply["content"]:
                 self.conversation.learn_notes(reply["content"])
@@ -601,15 +601,15 @@ def png_of(grid: list[list[int]], scale: int) -> bytes:
 def play_games(arcade: Any, game_ids: list[str], minutes: float, concurrency: int, config: Config,
                max_actions: int | None = None) -> dict[str, dict[str, Any]]:
     """Plays the games in parallel on one scorecard; returns the official score, levels and actions per game."""
-    card = arcade.open_scorecard(tags=["duck"])
-    model = Model(config)
+    card = arcade.open_scorecard(tags=["agent"])
+    llm = LLM(config)
 
     def one(game_id: str) -> None:
-        duck = Duck(Game(arcade.make(game_id, scorecard_id=card), game_id), model, config,
+        agent = Agent(Game(arcade.make(game_id, scorecard_id=card), game_id), llm, config,
                     time.time() + minutes * 60, max_actions)
-        duck.play()
-        print(f"[{game_id}] levels {duck.game.levels}, actions {duck.game.actions_taken}, turns {duck.turn}, "
-              f"generated tokens {duck.tokens}", flush=True)
+        agent.play()
+        print(f"[{game_id}] levels {agent.game.levels}, actions {agent.game.actions_taken}, turns {agent.turn}, "
+              f"generated tokens {agent.tokens}", flush=True)
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         list(pool.map(one, game_ids))

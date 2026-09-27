@@ -1,10 +1,10 @@
-# ARC Prize 2026 — ARC-AGI-3. The agent is one file: agent/duck.py (an LLM that plays by writing Python).
+# ARC Prize 2026 — ARC-AGI-3. The agent is one file: agent/model.py (an LLM that plays by writing Python).
 #
 #   make setup                      one-time: venv + arc-agi + dev tools
 #   make games                      download the public game sources into environment_files/
 #   make llm-local-setup            one-time: vLLM + the local 4B dev model
 #   make llm-local                  serve the local model (vision + tools + 32K context, as the Duck needs)
-#   make play GAME=ar25 MINUTES=10  play games with agent/duck.py against the local model
+#   make play GAME=ar25 MINUTES=10  play games with agent/model.py against the local model
 #   make check test                 lint + types, unit tests
 
 PYTHON        ?= 3.12
@@ -31,8 +31,8 @@ games: ## Download the public game sources (NORMAL mode fetches each game once) 
 	    a = arc_agi.Arcade(operation_mode=arc_agi.OperationMode.NORMAL); \
 	    [a.make(e.game_id) for e in a.available_environments]; print('games:', len(a.available_environments))"
 
-play: ## Play GAME (comma list or all) for MINUTES each with agent/duck.py (needs make llm-local)
-	DUCK_TRACE_DIR=.claude/scratch/duck/play DUCK_MAX_TOKENS=8192 $(VENV_PY) -m agent.duck --games $(GAME) --minutes $(MINUTES) \
+play: ## Play GAME (comma list or all) for MINUTES each with agent/model.py (needs make llm-local)
+	AGENT_TRACE_DIR=.claude/scratch/agent/play AGENT_MAX_TOKENS=8192 $(VENV_PY) -m agent.model --games $(GAME) --minutes $(MINUTES) \
 	    --concurrency $(CONCURRENCY)
 
 check: ## Lint + type-check

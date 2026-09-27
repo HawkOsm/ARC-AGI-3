@@ -7,7 +7,7 @@ Third-party code and ideas this repo uses or was shaped by, and exactly how.
 **The Duck — Tufa Labs** (ARC Prize 2026 ARC-AGI-3 Milestone #1 winner; Harold Bessis, Jeroen Cottaar, Isaiah
 Pressman, Andries Smit, Michal Tesnar, Stefano Viel). Source read from the Kaggle dataset
 [`jeroencottaar/taaf-kaggle-source-share`](https://www.kaggle.com/datasets/jeroencottaar/taaf-kaggle-source-share)
-(licence **MIT** as listed on the dataset), 2026-09-26/27. `agent/duck.py` is **our own rewrite of its design**:
+(licence **MIT** as listed on the dataset), 2026-09-26/27. `agent/model.py` is **our own rewrite of its design**:
 one `python` tool whose code calls `action(...)`, a segmentation view of the screen, before/after frames, the
 model-written world-model notes carried between turns, context eviction, the prompt's playing advice (HUD bars are
 not puzzle pieces; probe when unsure; search and batch when the goal is clear). No code was copied; the
@@ -42,7 +42,7 @@ studied later, update this entry with what was taken.
 this competition): volatile-cell-masked state hashing, a learned transition model with verified
 BFS planning, object-centric avatar identification, no-op/undo interface learning,
 programmatic-first with LLM-as-rescue. The former `agent/brain/` (deleted 2026-09-27, in git history)
-implemented the first four; the project has since moved to an LLM-first design (`agent/duck.py`).
+implemented the first four; the project has since moved to an LLM-first design (`agent/model.py`).
 
 **Tufa Labs' harness repo** (cloned 2026-09-26 to `.claude/scratch/llm/duck-harness`; that GitHub copy carries no
 licence file) was read for its serving setup: one vLLM OpenAI-compatible server inside the Kaggle notebook from an

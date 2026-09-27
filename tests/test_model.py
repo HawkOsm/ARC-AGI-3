@@ -1,10 +1,10 @@
-"""agent/duck.py: the sandbox, the conversation, the game wrapper, and one whole turn with a fake model."""
+"""agent/model.py: the sandbox, the conversation, the game wrapper, and one whole turn with a fake model."""
 import json
 import struct
 
 import pytest
 
-from agent.duck import Config, Conversation, Duck, Game, Model, Sandbox, png_of
+from agent.model import LLM, Agent, Config, Conversation, Game, Sandbox, png_of
 
 
 def _state(*frames, result=None):
@@ -67,7 +67,7 @@ def ls20():
     return Game(arc.make("ls20", scorecard_id=arc.open_scorecard(tags=["test"])), "ls20")
 
 
-def test_game_runs_actions_in_the_ducks_names(ls20):
+def test_game_runs_actions_in_the_models_names(ls20):
     ls20.start()
     assert ls20.valid_names() and len(ls20.frames) == 1
     r = ls20.do("UP")
@@ -83,12 +83,12 @@ def test_one_turn_with_a_fake_model_plays_the_models_code(ls20, monkeypatch):
          "tool_calls": [{"id": "c1", "type": "function",
                          "function": {"name": "python", "arguments": json.dumps({"code": code})}}], "usage": {}},
     ])
-    monkeypatch.setattr(Model, "chat", lambda self, messages: next(replies))
-    duck = Duck(ls20, Model(Config()), Config(image_upscale=2), deadline=1e18)
+    monkeypatch.setattr(LLM, "chat", lambda self, messages: next(replies))
+    agent = Agent(ls20, LLM(Config()), Config(image_upscale=2), deadline=1e18)
     ls20.start()
-    duck.play_turn()
+    agent.play_turn()
     assert ls20.actions_taken == 2 and [f[0] for f in ls20.frames[1:]] == ["UP", "DOWN"]
-    assert duck.conversation.notes["Plan"] == "probe keys."
-    last = duck.conversation.messages[-1]
+    assert agent.conversation.notes["Plan"] == "probe keys."
+    last = agent.conversation.messages[-1]
     assert last["role"] == "tool" and "actions run" in last["content"]
-    assert "executed 2 action(s): UP, DOWN" in duck.last_summary
+    assert "executed 2 action(s): UP, DOWN" in agent.last_summary

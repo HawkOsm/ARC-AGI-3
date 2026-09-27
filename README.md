@@ -7,7 +7,7 @@ Kaggle competition (interactive reasoning games; deadline 2026-11-02).
 
 | | |
 |---|---|
-| `agent/duck.py` | the whole agent: an LLM that plays by writing Python (read top to bottom) |
+| `agent/model.py` | the whole agent: an LLM that plays by writing Python (read top to bottom) |
 | `tests/` | `make test` (no GPU, no network) |
 | `notebooks/duck_repro/` | the public Duck notebook, unchanged — our Kaggle baseline and notebook template |
 | `notebooks/llm_prep/`, `llm_dev/` | serving our own model on Kaggle (vLLM wheelhouse, model mirror check) |
