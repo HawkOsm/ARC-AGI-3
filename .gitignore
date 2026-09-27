@@ -31,3 +31,4 @@ models/
 .venv-llm/
 kaggle_datasets/
 notebooks/agent/build/
+notebooks/agent/submit/

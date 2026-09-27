@@ -4,6 +4,18 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-27 — Kaggle run D: our agent after the interface fixes + old-brain pieces (server crashed mid-run)
+- Change: run C's settings (Flash-Next, context 12K) with prefix cache off, and the agent from 803ddcb (interface
+  fixes, step-counter memory, no-op refusal, `changes()`, `memory`). Pushed by the owner (`hawkosm/arc3-agent` v2).
+- Result: **2.70 / 16 levels** (run C 1.11 / 11; run A 9.81 / 38): ft09 3 levels (23.81), vc33 2, tu93 2; tool
+  errors 11% (run C 20%). BUT the model server died of **CUDA out of memory** at 15:50, ~38 min into play (max 28
+  requests at once; the public notebook uses 8), and with no watchdog every game spent the remaining ~90 min on
+  "connection refused" (927 failed requests per game). The score covers ~38 of 130 minutes.
+- Fixes: `--max-seqs` default 8 (the public notebook's measured-safe value); the fork's `vllm_server_watchdog`
+  started after setup (4 failed health checks -> restart, at most 2); our own restarter for the 27B path. Also found
+  with a local competition-mode arc_agi server: scored mode crashed every game (`make()` -> None); fixed (50d693c).
+- Verdict: BETTER than run C but INVALID as a measurement (server died); submission built from the fixed code.
+
 ## 2026-09-27 — Local old-vs-new: interface fixes + old-brain pieces (no GPU)
 - Change: old = run C's `agent/model.py` (6973088); new = the run-C fixes (pixels as cell lists, `.rows`/`.at`,
   preloaded modules, hashlib, no files, temp folder) + old-brain pieces (step-counter `Hud`, screen map that refuses

@@ -17,6 +17,7 @@ import math
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import zlib
@@ -79,19 +80,27 @@ def serve_flashnext() -> tuple[str, str]:
         inputs[ref] = str(bundle if ref == SETTINGS["serving_datasets"][0] else (found[0] if found else ""))
     setup_env_path = WORKING_DIR / "taaf_setup_env.json"
     setup_env_path.write_text("{}")
-    env = dict(os.environ, PYTHON=sys.executable, TAAF_KAGGLE_BUNDLE_DIR=str(bundle),
-               TAAF_KAGGLE_WORKING_DIR=str(WORKING_DIR), TAAF_KAGGLE_SETUP_ENV=str(setup_env_path),
-               TAAF_KAGGLE_INPUT_PATHS=json.dumps(inputs), TAAF_KAGGLE_DATASET_SOURCES=json.dumps(list(inputs)),
-               TAAF_VLLM_ENABLE_PREFIX_CACHING="1" if SETTINGS["prefix_cache"] else "0",
-               TAAF_VLLM_MAX_NUM_SEQS=str(SETTINGS["max_seqs"]),
-               TAAF_VLLM_KV_CACHE_MEMORY_BYTES=str(SETTINGS["kv_cache_bytes"]),
-               TAAF_VLLM_KV_CACHE_DTYPE=SETTINGS["kv_cache_dtype"],
-               TAAF_VLLM_MAX_NUM_BATCHED_TOKENS="8192", TAAF_VLLM_MTP_TOKENS="3",
-               TAAF_VLLM_MAX_CUDAGRAPH_CAPTURE_SIZE="32", TAAF_VLLM_OMP_THREADS="1")
+    # into this process's environment too: the watchdog below loads serving_setup.py, which reads them on import
+    os.environ.update(
+        PYTHON=sys.executable, TAAF_KAGGLE_BUNDLE_DIR=str(bundle), TAAF_KAGGLE_WORKING_DIR=str(WORKING_DIR),
+        TAAF_KAGGLE_SETUP_ENV=str(setup_env_path), TAAF_KAGGLE_INPUT_PATHS=json.dumps(inputs),
+        TAAF_KAGGLE_DATASET_SOURCES=json.dumps(list(inputs)),
+        TAAF_VLLM_ENABLE_PREFIX_CACHING="1" if SETTINGS["prefix_cache"] else "0",
+        TAAF_VLLM_MAX_NUM_SEQS=str(SETTINGS["max_seqs"]),
+        TAAF_VLLM_KV_CACHE_MEMORY_BYTES=str(SETTINGS["kv_cache_bytes"]),
+        TAAF_VLLM_KV_CACHE_DTYPE=SETTINGS["kv_cache_dtype"], TAAF_VLLM_MAX_NUM_BATCHED_TOKENS="8192",
+        TAAF_VLLM_MTP_TOKENS="3", TAAF_VLLM_MAX_CUDAGRAPH_CAPTURE_SIZE="32", TAAF_VLLM_OMP_THREADS="1")
     for command in json.loads((bundle / "setup_commands.json").read_text()):
         print(f"setup: {command}", flush=True)
-        subprocess.run(command, shell=True, check=True, cwd=WORKING_DIR, env=env)
+        subprocess.run(command, shell=True, check=True, cwd=WORKING_DIR, env=dict(os.environ))
     setup = json.loads(setup_env_path.read_text())
+    # the fork's watchdog: restarts the server after 4 failed health checks, at most twice (run D's server died of
+    # a CUDA out-of-memory 38 min in and every game spent the rest of its time on "connection refused")
+    sys.path.insert(0, str(bundle))
+    import vllm_server_watchdog as watchdog
+    watchdog.start_background(watchdog.load_setup(bundle / "serving_setup.py"),
+                              watchdog.WatchdogConfig(interval_seconds=15.0, request_timeout_seconds=5,
+                                                      failure_threshold=4, max_restart_attempts=2))
     return setup["LOCAL_ANALYZER_BASE_URL"], setup["LOCAL_ANALYZER_MODEL_ID"]
 
 
@@ -126,7 +135,30 @@ def serve_qwen27b() -> tuple[str, str]:
     log = open(WORKING_DIR / "vllm.log", "w")
     server = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
     wait_for(f"http://127.0.0.1:{port}/v1/models", 45 * 60, server)
+    threading.Thread(target=restart_if_dead, args=(command, env, log, port), daemon=True).start()
     return f"http://127.0.0.1:{port}/v1", "qwen"
+
+
+def restart_if_dead(command: list[str], env: dict, log, port: int, restarts: int = 2) -> None:
+    """Our watchdog for the 27B server: 4 failed health checks in a row -> start it again (at most `restarts`)."""
+    failures = 0
+    while restarts > 0:
+        time.sleep(15)
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=5)
+            failures = 0
+        except Exception:
+            failures += 1
+        if failures >= 4:
+            print("model server is down: restarting it", flush=True)
+            subprocess.run(["pkill", "-f", "vllm.entrypoints.openai.api_server"])
+            time.sleep(10)
+            server = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
+            try:
+                wait_for(f"http://127.0.0.1:{port}/v1/models", 45 * 60, server)
+            except Exception as e:
+                print(f"restart failed: {e}", flush=True)
+            failures, restarts = 0, restarts - 1
 
 
 serve_started = time.time()

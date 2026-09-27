@@ -54,7 +54,9 @@ def main() -> int:
     ap.add_argument("--model", choices=sorted(SOURCES), default="flashnext")
     ap.add_argument("--context", type=int, default=12000, help="AGENT_CONTEXT: tokens per call")
     ap.add_argument("--prefix-cache", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--max-seqs", type=int, default=28, help="requests the server runs at once")
+    ap.add_argument("--max-seqs", type=int, default=8,
+                    help="requests the server runs at once (8 as the public notebook; 28 ran the GPU out of memory "
+                         "in run D)")
     ap.add_argument("--kv-cache-bytes", type=int, default=5 * 1024**3,
                     help="flashnext: fixed cache size (run A: 5 GiB; 0 = let vLLM size it, risk of OOM)")
     ap.add_argument("--kv-cache-dtype", choices=["auto", "fp8"], default="auto", help="fp8 ~doubles the cache")
