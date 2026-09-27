@@ -4,6 +4,17 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-27 — Local old-vs-new: interface fixes + old-brain pieces (no GPU)
+- Change: old = run C's `agent/model.py` (6973088); new = the run-C fixes (pixels as cell lists, `.rows`/`.at`,
+  preloaded modules, hashlib, no files, temp folder) + old-brain pieces (step-counter `Hud`, screen map that refuses
+  known no-ops, life lengths, `changes()`, `memory`, frame deltas) (c7b73f6).
+- Command: `.claude/scratch/agent/localab/run.sh` — both versions on ar25, ls20, vc33, ft09, tn36, sc25, 8 min each,
+  3 at once, AGENT_CONTEXT=12000, AGENT_MAX_TOKENS=8192, local Qwen3.5-4B; `compare.py`.
+- Result: tool calls that errored **80/491 (16%) -> 5/294 (2%)**; calls per turn **3.19 -> 1.27** (the Duck ~1.0);
+  actions 114 -> 222; turns 154 -> 232; levels 0 -> 0 (the 4B).
+- Verdict: BETTER on what it measures (interface errors, calls per turn, actions) — one run each on the weak local
+  model; the score question needs Kaggle (next run: same settings as run C, prefix cache off).
+
 ## 2026-09-27 — Kaggle run C: our `agent/model.py` on Flash-Next, context 12K, prefix cache on
 - Change: first Kaggle run of our own agent (`notebooks/agent/build.py --model flashnext --context 12000
   --prefix-cache`, pushed by the owner as `hawkosm/arc3-agent`). Differences from run A: our rewrite of the agent,

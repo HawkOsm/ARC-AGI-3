@@ -20,7 +20,7 @@ algorithms are added only where the model measurably needs them.
  │      ▼                                                                                           │
  │ Sandbox.run    a fresh `python -I -S` process, stdlib only, 30 s: the code reads current_frame / │
  │                previous_frame (.ascii, .segmentation = objects + adjacency), history,            │
- │                transitions, last_action_result, valid_actions — and calls action([...]) ──┐      │
+ │                transitions, known, changes(), memory, valid_actions — calls action([...]) ┐      │
  │      ▲                                                                                    │      │
  │      └─ refreshed state after every action ◄── Game.do() → arc_agi env.step() ◄───────────┘      │
  └────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -31,7 +31,8 @@ algorithms are added only where the model measurably needs them.
 |---|---|
 | `Config` | every setting (`AGENT_*` environment variables) |
 | `Sandbox` | runs one piece of model code in its own process; relays its `action()` calls |
-| `Game` | one arc_agi game: frames, actions in the model's names (UP DOWN LEFT RIGHT SPACE MOUSE UNDO), RESET |
+| `Game` | one arc_agi game: frames, actions in the model's names (UP DOWN LEFT RIGHT SPACE MOUSE UNDO), RESET; does not resend an action that already gave "no change" / "game over" on the same screen |
+| `Memory`, `Hud` | from the old brain: every (screen, action) and its outcome, step counters found and hidden, actions per life; shown to the model as `known` and in each turn's message |
 | `LLM` | the chat request with the python tool (recovers tool calls written as markup) |
 | `Conversation` | the messages sent, the model's notes, fitting the context budget |
 | `Agent` | plays one game: turns, the per-turn prompt, traces (`AGENT_TRACE_DIR`) |
