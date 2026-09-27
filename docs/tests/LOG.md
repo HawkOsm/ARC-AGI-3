@@ -4,6 +4,17 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-27 — Kaggle run A: the public Duck (Qwen3.8-Flash-Next NVFP4) unchanged — our baseline for the Duck
+- Change: none — `notebooks/duck_repro` = the public notebook `keithtyser/duck-qwen3-8-flash-next-nvfp4-mtp` (Tufa Labs
+  Duck harness, MIT) pushed as `hawkosm/duck-flashnext-repro` (owner OK). RTX PRO 6000, 25 public games at once,
+  ~2.2 h per game, no action cap. Model server ready after 1070 s.
+- Result (the harness's own scorer, `score.json`): **9.81**; **38 levels** (ft09 6/6 = 100, re86 4, ar25 3, vc33 3,
+  ka59 2, lf52 2, m0r0 2, s5i5 2, tu93 2; 0 on sc25, sk48, sp80, tn36); 3900 actions; every game but ft09 used its
+  whole time budget. Session ~2.8 h. For comparison our step 2 (local 4B, 200 actions): 10–12 levels; it beats the
+  Duck on sc25 (2 vs 0) and tn36 (1 vs 0). Outputs: `.claude/scratch/duck/kaggle_a1/`.
+- Verdict: INFO — the Duck on the public games; baseline for run B (the same + our `brain_hints`). The leaderboard
+  "~5" of this notebook is on the hidden games.
+
 ## 2026-09-26 — Steps 4 and 5: fallback exploration, known-test filter, event-based asking (hypothesis mode)
 - Changes, in order (frozen builds in `experiments/2026-09-26_hyp_step{4,4b,5_events,5b}/`):
   step 4 — a click test with no coordinates clicks a cell of `test.object` (before: every click test was dropped, so
