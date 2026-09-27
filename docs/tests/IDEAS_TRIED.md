@@ -13,6 +13,10 @@ Kaggle or more data) · ⚠️ scorer-dependent
 
 | idea | why | how to test | setting / status |
 |---|---|---|---|
+| **More thinking per game** — the run was starved: 87% of each call was queue wait (124 of 143 s); the model weights (81.8 GB) left a 5 GB cache = 105k tokens, so only ~5 of 25 games could think at once; each game got ~53 model calls in 2.2 h and 24/25 ran out of time | run A analysis (LOG 2026-09-27) | (a) shorter conversations per call (avg prompt 20k tokens; a 10–12k budget ≈ 2× games at once); (b) the smaller Qwen3.8-27B-FP8 (~27 GB weights → ~60 GB cache, all games at once, weaker per call); (c) prefix cache on (it was off: 27.3M prompt tokens re-read) | `AGENT_CONTEXT`; model choice; server flags |
+| Fewer wasted actions: 314 of 3900 actions (8%) changed nothing on the board (ar25: 169 of 409) | run A analysis | tell the model / refuse repeating an action that just did nothing on the same screen | not built |
+| Fewer game-overs mid-experiment: 34 in total (sp80 11, tn36 7, tu93 6); sp80's notes blame "mid-sequence restarts" for corrupted measurements | run A analysis | say when the step counter is nearly out; tell the model plainly that a restart happened and what it undid | not built |
+| More actions per call: only ~1/3 of actions ran in batches | run A analysis | prompt: plan a sequence and batch it once confident | prompt |
 | Screen in each message as letters instead of an image (owner) | text grids may be easier for an LLM than pictures (one unverified paper: 80–86% vs 16–34%); the Duck sends both | same games and budget, `AGENT_SCREEN=text` vs `image` (also `both`, `none`) | `AGENT_SCREEN`, ready |
 
 ## State identity

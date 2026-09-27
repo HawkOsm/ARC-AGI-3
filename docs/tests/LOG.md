@@ -4,6 +4,19 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-27 — Analysis of Kaggle run A (no new run): where the public Duck's time and actions went
+- Command: `python3 .claude/scratch/duck/analysis/analyze_run.py .claude/scratch/duck/kaggle_a1` (events, transcripts,
+  benchmark.json, vLLM metrics and log of run A).
+- Result: 1358 model calls, 1324 turns, 3900 actions, 25 games, 2.2 h per game. Per call: 143 s end to end = **124 s
+  queue** + 1.6 s prefill + 16.7 s decode; ~20k prompt tokens and ~1.5k generated tokens per call; prefix cache off
+  (0 hits; 27.3M prompt tokens); 121 preemptions. Server: weights 81.8 GiB, KV cache fixed at 5 GiB = 105,202 tokens
+  (≈5 calls of 20k at once), max 8 sequences, model load 851 s. Each game got ~53 calls (~150 s per turn); 24/25 games
+  used their whole time. Once a level is understood it is efficient (ft09 L1 4 actions vs baseline 43; vc33 8/7,
+  8/18). 314/3900 actions changed nothing on the board (ar25 169/409); 34 game-overs (sp80 11, tn36 7, tu93 6);
+  63 tool results with errors; 24 request timeouts; 14 replies cut at the length limit.
+- Verdict: INFO — the bottleneck is thinking time per game (queueing for a small KV cache), not actions. Ideas ranked
+  in IDEAS_TRIED "Ideas to test next".
+
 ## 2026-09-27 — One-file Duck (`agent/duck.py`); the brain-first codebase deleted
 - Change: owner decision "LLM first, algorithms later; simplify". New `agent/duck.py` (~620 lines): our own rewrite
   of the Duck design (python tool whose code calls `action(...)`, segmentation view, before/after frames, the model's
