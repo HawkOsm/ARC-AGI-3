@@ -118,3 +118,63 @@ def test_sandbox_helpers_rows_entry_frames_and_no_files():
     out = Sandbox.run(code, _state(("", grid)), lambda a: ({}, _state(("", grid))), 10)
     assert "b R WR" in out["stdout"] and "Counter({'W': 1, 'R': 1}) 2 4" in out["stdout"]
     assert "9dd4" in out["stdout"] and "PermissionError" in out["error"]
+
+
+class _Frame:
+    def __init__(self, grid, levels=0, state="NOT_FINISHED"):
+        self.frame, self.levels_completed, self.available_actions = [grid], levels, [1, 2]
+        self.state = type("S", (), {"value": state})()
+
+
+class _ToyEnv:
+    """A dot that UP moves up one row (nothing happens at the top) and a step bar on row 9 that shrinks each step."""
+
+    def __init__(self):
+        self.dot, self.steps = 5, 0
+
+    def _grid(self):
+        g = [[0] * 10 for _ in range(10)]
+        g[self.dot][4] = 8
+        for c in range(10 - self.steps):
+            g[9][c] = 11
+        return g
+
+    def reset(self):
+        return _Frame(self._grid())
+
+    def step(self, action, data=None):
+        self.steps += 1
+        if int(action.value[0] if isinstance(action.value, tuple) else action.value) == 1:
+            self.dot = max(0, self.dot - 1)
+        return _Frame(self._grid())
+
+
+def test_memory_learns_the_step_bar_and_skips_known_no_ops():
+    game = Game(_ToyEnv(), "toy")
+    game.start()
+    outcomes = [game.do("UP")["outcome"] for _ in range(5)]
+    assert outcomes == ["changed"] * 5  # dot row 5 -> 0
+    assert "row 9" in game.memory.hud.summary()  # the shrinking bar is a step counter
+    r = game.do("UP")  # at the top: only the bar changes -> "no change"
+    assert r["outcome"] == "no change" and r["board_changed"] is False
+    skipped = game.do("UP")
+    assert skipped["executed"] is False and "already gave 'no change'" in skipped["skipped"]
+    assert game.do({"action": "UP", "force": True})["executed"] is True
+    assert game.actions_taken == 7  # the skipped one cost nothing
+
+
+def test_changes_known_and_memory_in_the_sandbox():
+    game = Game(_ToyEnv(), "toy")
+    game.start()
+    agent = Agent(game, LLM(Config()), Config(), deadline=1e18)
+
+    def call(code):
+        out = agent._run_code({"function": {"arguments": json.dumps({"code": code})}})
+        assert out.get("error") is None, out
+        return out["stdout"]
+
+    printed = call("action(['UP', 'UP'])\nprint(changes()['moved'])\nmemory['seen'] = len(history)")
+    assert "'d_row': -1" in printed and "'color': 'R'" in printed
+    assert agent.saved == {"seen": 3}  # start + 2 actions: only new frames were sent, appended in the sandbox
+    printed = call("print(memory['seen'], sorted(known['tried_here']), known['actions_this_life'])")
+    assert printed.strip() == "3 [] 2"  # new screen: nothing tried here yet

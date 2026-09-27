@@ -94,10 +94,19 @@ long output is cut). These variables are already defined in every call (do not i
 - `history` (list of entries with `.action` (a string) and `.frame`; history[-1].frame is the current frame),
   `transitions` (`.action`, `.before`, `.after`, `.result`), `last_action_result` (dict: board_changed,
   level_completed, game_over, run_complete, levels_completed), `valid_actions` (list of names).
+- `changes()` (or `changes(frame_a, frame_b)`): what changed between two frames by object: moved (with from/to
+  bbox and d_row/d_col), appeared, disappeared; the step counter is ignored. Use it after every action.
+- `known`: what the agent remembers: `tried_here` (actions already tried on this exact screen and their outcome:
+  changed / no change / game over / level completed), `step_counter` (cells that count steps; not puzzle pieces),
+  `actions_this_life`, `earlier_lives_lasted` (actions per life that ended in game over: your step budget).
+- `memory`: a dict you may fill (JSON values only); it is kept between your python calls. Store what you learned
+  (action effects, the goal, coordinates) so you do not recompute it.
 - Already imported for you: collections, Counter, defaultdict, deque, heapq, itertools, math. Files are not available.
 - `action(actions)` executes real game actions and refreshes every variable above. Pass a list:
   ['UP'], ['LEFT', 'LEFT'], or [{{'action': 'MOUSE', 'row': 12, 'col': 30}}]. UP DOWN LEFT RIGHT SPACE MOUSE UNDO.
-  It returns a dict (executed, board_changed, level_completed, game_over, run_complete, levels_completed, ...).
+  It returns a dict (executed, outcome, board_changed, level_completed, game_over, run_complete, levels_completed).
+  An action that already gave "no change" or "game over" on this exact screen is not sent again (it would only cost
+  an action); add 'force': True to a dict action to send it anyway.
 - Inspect and act in the SAME call when you can: every call costs time.
 
 How to play well:
@@ -219,9 +228,36 @@ env = {"__builtins__": dict(vars(builtins), __import__=_import, open=_no_files),
        # preloaded: the model's code uses these without importing them (63 NameErrors on Kaggle, run C)
        "collections": collections, "Counter": collections.Counter, "defaultdict": collections.defaultdict,
        "deque": collections.deque, "heapq": heapq, "itertools": itertools, "math": math}
+def changes(before=None, after=None):
+    """What changed between two frames (default: previous_frame -> current_frame), by object: objects with the same
+    hash in both but somewhere else moved; the rest appeared or disappeared. Ignores cells the step counter uses."""
+    before = before if before is not None else env["previous_frame"]
+    after = after if after is not None else env["current_frame"]
+    if before is None or after is None:
+        return {"moved": [], "appeared": [], "disappeared": []}
+    hud = {tuple(c) for c in env["known"].get("hud_cells", [])}
+    def objects(frame):
+        return [n for n in frame.segmentation["nodes"] if not all(tuple(p) in hud for p in n["pixels"])]
+    old, new = objects(before), objects(after)
+    old_at = {(n["hash"], tuple(n["bbox"])) for n in old}
+    new_at = {(n["hash"], tuple(n["bbox"])) for n in new}
+    gone = [n for n in old if (n["hash"], tuple(n["bbox"])) not in new_at]
+    came = [n for n in new if (n["hash"], tuple(n["bbox"])) not in old_at]
+    moved = []
+    for n in list(came):
+        match = next((o for o in gone if o["hash"] == n["hash"]), None)
+        if match is not None:
+            gone.remove(match); came.remove(n)
+            moved.append({"color": n["color"], "hash": n["hash"], "from": match["bbox"], "to": n["bbox"],
+                          "d_row": n["bbox"][0] - match["bbox"][0], "d_col": n["bbox"][1] - match["bbox"][1]})
+    brief = lambda n: {"color": n["color"], "hash": n["hash"], "bbox": n["bbox"], "size": n["size"]}
+    return {"moved": moved, "appeared": [brief(n) for n in came], "disappeared": [brief(n) for n in gone]}
+
 def _load(state):
-    history = [Entry(e["action"], Frame(e["frame"])) for e in state["history"]]
+    entries = [Entry(e["action"], Frame(e["frame"])) for e in state["history"]]
+    history = (env.get("history", []) + entries)[-40:] if state.get("append") else entries
     env["history"] = history
+    env["known"] = state.get("known", {})
     env["current_frame"] = history[-1].frame if history else None
     env["previous_frame"] = history[-2].frame if len(history) > 1 else None
     env["transitions"] = [Transition(history[i].action, history[i - 1].frame, history[i].frame,
@@ -238,12 +274,14 @@ def action(actions):
     _load(reply["state"])
     return reply["result"]
 env["action"] = action
+env["changes"] = changes
 
 def _timeout(signum, frame):
     raise TimeoutError("the python call hit its time limit")
 
 request = _recv()
 _load(request["state"])
+env["memory"] = request["state"].get("memory") or {}
 resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
 signal.signal(signal.SIGALRM, _timeout)
 signal.alarm(request["timeout"])
@@ -255,7 +293,11 @@ except BaseException as e:
     error = f"{type(e).__name__}: {e}"
 signal.alarm(0)
 result = env.get("result")
-_send({"type": "done", "stdout": out.getvalue(), "error": error,
+try:
+    memory = json.loads(json.dumps(env.get("memory", {})))
+except (TypeError, ValueError):
+    memory, error = None, (error or "") + " | `memory` must hold JSON values only (dicts, lists, str, numbers)"
+_send({"type": "done", "stdout": out.getvalue(), "error": error, "memory": memory,
        "result": None if result is None else repr(result)[:2000]})
 '''
 
@@ -298,6 +340,113 @@ class Sandbox:
             shutil.rmtree(workdir, ignore_errors=True)
 
 
+# ── what the agent remembers for the model (pieces of the old brain, git 4eab2e7^: learn.CounterLearner,
+#    LevelMemory's screen map, learn.DeathJudge) ────────────────────────────────
+
+COUNTER_TICK_MAX_CELLS = 4  # a change this small ...
+COUNTER_BORDER_BAND = 3  # ... this close to the screen edge is a counter "tick"
+COUNTER_TRACK_MIN_POSITIONS = 3  # a line with ticks at this many places, close together, is a counter track
+COUNTER_TRACK_MAX_GAP = 2
+
+
+@dataclass(slots=True)
+class Hud:
+    """Step counters and timer bars: small changes at the screen edge that advance along a line. Hidden when
+    screens are compared, so a ticking counter is not taken for a real change (the old brain's CounterLearner)."""
+    ignore: np.ndarray = field(default_factory=lambda: np.zeros((64, 64), dtype=bool))
+    along_row: list[set[int]] = field(default_factory=lambda: [set() for _ in range(64)])
+    along_col: list[set[int]] = field(default_factory=lambda: [set() for _ in range(64)])
+
+    def learn(self, before: np.ndarray, after: np.ndarray) -> None:
+        if before.shape != after.shape or self.ignore.shape != after.shape:
+            self.ignore = np.zeros(after.shape, dtype=bool)
+            self.along_row = [set() for _ in range(after.shape[0])]
+            self.along_col = [set() for _ in range(after.shape[1])]
+            return
+        edge = np.zeros(after.shape, dtype=bool)
+        b = COUNTER_BORDER_BAND
+        edge[:b, :] = edge[-b:, :] = edge[:, :b] = edge[:, -b:] = True
+        for blob in _blobs(before != after):
+            if len(blob) <= COUNTER_TICK_MAX_CELLS and all(edge[y, x] for y, x in blob):
+                for y, x in blob:
+                    self.ignore[y, x] = True
+                cy, cx = round(sum(y for y, _ in blob) / len(blob)), round(sum(x for _, x in blob) / len(blob))
+                for y in {y for y, _ in blob}:
+                    self.along_row[y].add(cx)
+                for x in {x for _, x in blob}:
+                    self.along_col[x].add(cy)
+        for r, positions in enumerate(self.along_row):
+            if _is_track(positions):
+                self.ignore[r, :] = True
+        for c, positions in enumerate(self.along_col):
+            if _is_track(positions):
+                self.ignore[:, c] = True
+
+    def hide(self, grid: np.ndarray) -> np.ndarray:
+        picture = grid.copy()
+        if picture.shape == self.ignore.shape:
+            picture[self.ignore] = -1
+        return picture
+
+    def summary(self) -> str:
+        if not self.ignore.any():
+            return "none found yet"
+        rows = [r for r in range(self.ignore.shape[0]) if self.ignore[r].all()]
+        cols = [c for c in range(self.ignore.shape[1]) if self.ignore[:, c].all()]
+        parts = [f"row {r}" for r in rows] + [f"col {c}" for c in cols]
+        return ", ".join(parts) if parts else f"{int(self.ignore.sum())} cells at the screen edge"
+
+
+def _is_track(positions: set[int]) -> bool:
+    if len(positions) < COUNTER_TRACK_MIN_POSITIONS:
+        return False
+    p = sorted(positions)
+    return all(b - a <= COUNTER_TRACK_MAX_GAP for a, b in zip(p, p[1:], strict=False))
+
+
+def _blobs(changed: np.ndarray) -> list[list[tuple[int, int]]]:
+    """8-connected groups of True cells."""
+    todo = set(zip(*(axis.tolist() for axis in np.nonzero(changed)), strict=True))
+    blobs = []
+    while todo:
+        start = todo.pop()
+        blob, queue = [start], [start]
+        while queue:
+            y, x = queue.pop()
+            for n in ((y + dy, x + dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1)):
+                if n in todo:
+                    todo.remove(n)
+                    blob.append(n)
+                    queue.append(n)
+        blobs.append(blob)
+    return blobs
+
+
+@dataclass(slots=True)
+class Memory:
+    """What happened so far, for the model and for not wasting actions: every (screen, action) tried and its
+    outcome (the old brain's screen map), step counters (Hud), and how long each life lasted (its DeathJudge)."""
+    hud: Hud = field(default_factory=Hud)
+    tried: dict[tuple[int, int], dict[str, str]] = field(default_factory=dict)  # (level, screen) -> action -> outcome
+    life_actions: int = 0  # actions since the level (re)started
+    life_lengths: list[int] = field(default_factory=list)  # actions in lives that ended in GAME_OVER
+
+    def screen(self, grid: np.ndarray) -> int:
+        return hash(self.hud.hide(grid).tobytes())
+
+    def known(self, level: int, grid: np.ndarray) -> dict[str, str]:
+        return self.tried.get((level, self.screen(grid)), {})
+
+    def record(self, level: int, before: np.ndarray, label: str, after: np.ndarray, outcome: str) -> None:
+        self.hud.learn(before, after)
+        self.tried.setdefault((level, self.screen(before)), {})[label] = outcome
+
+    def summary(self, level: int, grid: np.ndarray) -> dict[str, Any]:
+        return {"tried_here": self.known(level, grid), "step_counter": self.hud.summary(),
+                "hud_cells": [[int(r), int(c)] for r, c in zip(*np.nonzero(self.hud.ignore), strict=True)],
+                "actions_this_life": self.life_actions, "earlier_lives_lasted": self.life_lengths[-5:]}
+
+
 # ── the game ────────────────────────────────────────────────────────────────
 
 
@@ -311,6 +460,7 @@ class Game:
     levels: int = 0
     valid: list[int] = field(default_factory=list)
     actions_taken: int = 0
+    memory: Memory = field(default_factory=Memory)
 
     def start(self) -> None:
         self._take(self.env.reset(), "")
@@ -324,18 +474,35 @@ class Game:
             self.frames.append((label, grid, self.levels + 1, self.actions_taken))
 
     def do(self, action: Any) -> dict[str, Any]:
-        """One action; a result dict the model reads (level_completed, game_over, board_changed, ...)."""
+        """One action; a result dict the model reads (level_completed, game_over, board_changed, ...). An action
+        that already did nothing (or lost the game) on this exact screen is not repeated unless forced: every action
+        counts, and the games are deterministic."""
         from arcengine import GameAction
         name, data, label = self._parse(action)
         if name not in NAME_TO_ID or NAME_TO_ID[name] not in self.valid:
             return {"executed": False, "error": f"{label} is not a valid action now; valid: {self.valid_names()}"}
-        before, levels_before = self.frames[-1][1], self.levels
+        before, level = np.array(self.frames[-1][1]), self.levels + 1
+        known = self.memory.known(level, before).get(label)
+        if known in ("no change", "game over") and not (isinstance(action, dict) and action.get("force")):
+            return {"executed": False, "action": label, "skipped": f"not sent: on this exact screen {label} already "
+                    f"gave '{known}' (pass {{'action': ..., 'force': True}} to send it anyway)"}
+        levels_before = self.levels
         self.actions_taken += 1
+        self.memory.life_actions += 1
         self._take(self.env.step(GameAction.from_id(NAME_TO_ID[name]), data=data), label)
-        return {"executed": True, "action": label, "board_changed": self.frames[-1][1] != before,
-                "level_completed": self.levels > levels_before, "levels_completed": self.levels,
-                "game_over": self.state == "GAME_OVER", "run_complete": self.state == "WIN",
-                "valid_actions": self.valid_names()}
+        after = np.array(self.frames[-1][1])
+        game_over, completed = self.state == "GAME_OVER", self.levels > levels_before
+        changed = bool((self.memory.hud.hide(before) != self.memory.hud.hide(after)).any())
+        outcome = ("level completed" if completed else "game over" if game_over
+                   else "changed" if changed else "no change")
+        self.memory.record(level, before, label, after, outcome)
+        if game_over:
+            self.memory.life_lengths.append(self.memory.life_actions)
+        if completed or game_over:
+            self.memory.life_actions = 0
+        return {"executed": True, "action": label, "outcome": outcome, "board_changed": changed,
+                "level_completed": completed, "levels_completed": self.levels, "game_over": game_over,
+                "run_complete": self.state == "WIN", "valid_actions": self.valid_names()}
 
     @staticmethod
     def _parse(action: Any) -> tuple[str, dict[str, int], str]:
@@ -355,10 +522,14 @@ class Game:
     def valid_names(self) -> list[str]:
         return [ACTION_NAMES[a] for a in self.valid if a in ACTION_NAMES]
 
-    def sandbox_state(self, last_result: dict[str, Any]) -> dict[str, Any]:
-        """What the model's code sees (the last 40 frames: enough for diffs, small enough to send)."""
-        history = [{"action": a, "frame": {"grid": g, "level": lv, "step": s}} for a, g, lv, s in self.frames[-40:]]
-        return {"history": history, "last_action_result": last_result, "valid_actions": self.valid_names()}
+    def sandbox_state(self, last_result: dict[str, Any], since: int = 0) -> dict[str, Any]:
+        """What the model's code sees: the frames after index `since` (at most the last 40), the last result, the
+        valid actions, and what the memory knows about the current screen."""
+        start = max(since, len(self.frames) - 40)
+        history = [{"action": a, "frame": {"grid": g, "level": lv, "step": s}} for a, g, lv, s in self.frames[start:]]
+        known = self.memory.summary(self.levels + 1, np.array(self.frames[-1][1])) if self.frames else {}
+        return {"history": history, "append": since > 0, "last_action_result": last_result,
+                "valid_actions": self.valid_names(), "known": known}
 
 
 # ── the model ───────────────────────────────────────────────────────────────
@@ -479,6 +650,7 @@ class Agent:
     turn: int = 0
     tokens: int = 0
     trace: Any = None
+    saved: dict[str, Any] = field(default_factory=dict)  # the model's `memory` dict, kept between python calls
 
     def __post_init__(self) -> None:
         self.conversation = Conversation(int(self.config.context_tokens * 0.8))
@@ -546,6 +718,7 @@ class Agent:
             return {"code": "", "error": "the tool arguments were not valid JSON with a `code` string", "actions": []}
         stop = {"hit": False}
         ran: list[dict[str, Any]] = []  # every single action this call ran, in order
+        sent = {"frames": len(self.game.frames)}  # frames the sandbox has; action replies carry only newer ones
 
         def act(actions: list[Any]) -> tuple[dict[str, Any], dict[str, Any]]:
             results = []
@@ -561,10 +734,15 @@ class Agent:
             result = dict(result, executed_count=sum(1 for r in results if r.get("executed")),
                           requested_count=len(actions))
             self.last_result = result
-            return result, self.game.sandbox_state(result)
+            delta = self.game.sandbox_state(result, since=sent["frames"])
+            sent["frames"] = len(self.game.frames)
+            return result, delta
 
-        output = Sandbox.run(code, self.game.sandbox_state(self.last_result), act, self.config.tool_timeout_s)
+        state = dict(self.game.sandbox_state(self.last_result), memory=self.saved)
+        output = Sandbox.run(code, state, act, self.config.tool_timeout_s)
         output["code"], output["actions"] = code, ran
+        if isinstance(output.get("memory"), dict):
+            self.saved = output["memory"]
         if ran:
             executed = [a.get("action", "?") for a in ran if a.get("executed")]
             last = ran[-1]
@@ -594,8 +772,9 @@ class Agent:
             self.last_summary,
             f"Now: level {g.levels + 1}, {g.actions_taken} actions so far, state {g.state}. "
             f"Valid actions: {', '.join(g.valid_names())}.",
+            self._memory_line(),
             self.conversation.notes_text(),
-            "Look at what changed, update your world model lines, then act through the `python` tool.",
+            "Look at what changed (changes()), update your world model lines, then act through the `python` tool.",
         ]))
         screen = self.config.screen
         if screen not in ("image", "text", "both", "none"):
@@ -609,6 +788,17 @@ class Agent:
             parts.append({"type": "image_url",
                           "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}})
         return parts if len(parts) > 1 else text
+
+    def _memory_line(self) -> str:
+        """One line from the memory: what was tried on this screen, the step counter, how long lives last."""
+        g = self.game
+        if not g.frames:
+            return ""
+        m = g.memory.summary(g.levels + 1, np.array(g.frames[-1][1]))
+        tried = ", ".join(f"{a}: {o}" for a, o in list(m["tried_here"].items())[:12]) or "nothing yet"
+        lives = f"; earlier lives lasted {m['earlier_lives_lasted']} actions" if m["earlier_lives_lasted"] else ""
+        return (f"Already tried on this exact screen: {tried}. Step counter: {m['step_counter']}. "
+                f"This life: {m['actions_this_life']} actions{lives}.")
 
     def _log(self, record: dict[str, Any]) -> None:
         if self.trace is not None:
