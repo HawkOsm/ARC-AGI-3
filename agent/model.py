@@ -55,7 +55,8 @@ class Config:
     tool_timeout_s: int = 30  # one python call
     tool_output_chars: int = 4000  # what the model sees of one call's output
     max_tool_calls: int = 12  # per turn, before the turn is cut
-    image_upscale: int = int(os.environ.get("AGENT_IMAGE_UPSCALE", "4"))  # 0 = no image
+    screen: str = os.environ.get("AGENT_SCREEN", "image")  # the screen in each message: image | text | both | none
+    image_upscale: int = int(os.environ.get("AGENT_IMAGE_UPSCALE", "4"))  # pixels per cell in the image
     trace_dir: str = os.environ.get("AGENT_TRACE_DIR", "")
 
 
@@ -67,6 +68,7 @@ COLOR_LEGEND = ("W=white w=light gray g=gray G=dark gray c=charcoal B=black M=ma
 PALETTE = [(255, 255, 255), (204, 204, 204), (153, 153, 153), (102, 102, 102), (51, 51, 51), (0, 0, 0),
            (229, 58, 163), (255, 123, 204), (249, 60, 49), (30, 147, 255), (136, 216, 241), (255, 220, 0),
            (255, 133, 27), (146, 18, 49), (79, 204, 48), (163, 86, 214)]
+SCREEN_TEXT_HEADER = "The current screen, one letter per cell"  # older messages lose this part (like old images)
 NOTE_KEYS = ["World model", "Goal model", "Action model", "Recent findings", "Open questions", "Plan",
              "Cross-level notes"]
 
@@ -383,10 +385,11 @@ class Conversation:
     notes: dict[str, str] = field(default_factory=dict)
 
     def add(self, message: dict[str, Any]) -> None:
-        if message["role"] == "user":  # only the newest screen image is kept (older ones become text)
+        if message["role"] == "user":  # only the newest screen is kept (image or letter grid); older ones go
             for old in self.messages:
                 if old["role"] == "user" and isinstance(old.get("content"), list):
-                    old["content"] = " ".join(p.get("text", "") for p in old["content"] if p["type"] == "text")
+                    old["content"] = " ".join(p.get("text", "") for p in old["content"]
+                                              if p["type"] == "text" and not p["text"].startswith(SCREEN_TEXT_HEADER))
         self.messages.append(message)
         self._fit()
 
@@ -569,16 +572,34 @@ class Agent:
             self.conversation.notes_text(),
             "Look at what changed, update your world model lines, then act through the `python` tool.",
         ]))
-        if self.config.image_upscale <= 0:
-            return text
-        png = png_of(g.frames[-1][1], self.config.image_upscale)
-        return [{"type": "text", "text": text + "\nThe current screen:"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}}]
+        screen = self.config.screen
+        if screen not in ("image", "text", "both", "none"):
+            raise ValueError(f"AGENT_SCREEN must be image, text, both or none, not {screen!r}")
+        parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+        if screen in ("text", "both"):
+            parts.append({"type": "text", "text": letter_grid(g.frames[-1][1])})
+        if screen in ("image", "both"):
+            png = png_of(g.frames[-1][1], self.config.image_upscale)
+            parts.append({"type": "text", "text": "The current screen as an image:"})
+            parts.append({"type": "image_url",
+                          "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}})
+        return parts if len(parts) > 1 else text
 
     def _log(self, record: dict[str, Any]) -> None:
         if self.trace is not None:
             self.trace.write(json.dumps(record) + "\n")
             self.trace.flush()
+
+
+def letter_grid(grid: list[list[int]]) -> str:
+    """The screen as text: one letter per cell (the same letters as `.ascii`), row numbers on the left and column
+    numbers on top, so a cell can be read off as (row, col)."""
+    width = len(grid[0]) if grid else 0
+    tens = "".join(str(c // 10) if c % 10 == 0 else " " for c in range(width))
+    units = "".join(str(c % 10) for c in range(width))
+    rows = [f"{r:2d} " + "".join(COLOR_CHARS[v] for v in row) for r, row in enumerate(grid)]
+    return f"{SCREEN_TEXT_HEADER} (rows 0-{len(grid) - 1}, cols 0-{width - 1}):\n   {tens}\n   {units}\n" \
+        + "\n".join(rows)
 
 
 def png_of(grid: list[list[int]], scale: int) -> bytes:

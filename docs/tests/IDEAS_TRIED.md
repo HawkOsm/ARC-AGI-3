@@ -9,6 +9,12 @@ Kaggle or more data) · ⚠️ scorer-dependent
 
 ---
 
+## Ideas to test next (collected; none run yet)
+
+| idea | why | how to test | setting / status |
+|---|---|---|---|
+| Screen in each message as letters instead of an image (owner) | text grids may be easier for an LLM than pictures (one unverified paper: 80–86% vs 16–34%); the Duck sends both | same games and budget, `AGENT_SCREEN=text` vs `image` (also `both`, `none`) | `AGENT_SCREEN`, ready |
+
 ## State identity
 
 | idea | verdict | evidence | notes |

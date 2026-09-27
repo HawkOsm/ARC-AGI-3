@@ -92,3 +92,18 @@ def test_one_turn_with_a_fake_model_plays_the_models_code(ls20, monkeypatch):
     last = agent.conversation.messages[-1]
     assert last["role"] == "tool" and "actions run" in last["content"]
     assert "executed 2 action(s): UP, DOWN" in agent.last_summary
+
+
+def test_screen_setting_puts_letters_or_an_image_in_the_message_and_old_screens_are_dropped(ls20):
+    from agent.model import SCREEN_TEXT_HEADER
+    ls20.start()
+    for screen, kinds in (("text", ["text", "text"]), ("image", ["text", "text", "image_url"]),
+                          ("both", ["text", "text", "text", "image_url"]), ("none", None)):
+        content = Agent(ls20, LLM(Config()), Config(screen=screen), deadline=1e18)._user_content()
+        assert (content if isinstance(content, str) else [p["type"] for p in content]) == (kinds or content)
+    c = Conversation(budget_tokens=100_000)
+    agent = Agent(ls20, LLM(Config()), Config(screen="text"), deadline=1e18)
+    c.add({"role": "user", "content": agent._user_content()})
+    c.add({"role": "user", "content": agent._user_content()})
+    assert SCREEN_TEXT_HEADER not in c.messages[1]["content"]  # the older message lost its letter grid
+    assert any(p["text"].startswith(SCREEN_TEXT_HEADER) for p in c.messages[2]["content"])
