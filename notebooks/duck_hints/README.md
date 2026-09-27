@@ -6,5 +6,5 @@ dataset `hawkosm/arc3-duck-hints` (built by `scripts/build_duck_hints_dataset.py
 budget and games as the repro run: the A/B test of our addition.
 
 Push (dataset first, then the notebook):
-    .venv/bin/kaggle datasets create -p kaggle_datasets/duck_hints            # later versions: datasets version -m ...
+    .venv/bin/kaggle datasets create -p kaggle_datasets/duck_hints --dir-mode zip   # later: datasets version -m ... --dir-mode zip
     .venv/bin/kaggle kernels push -p notebooks/duck_hints
