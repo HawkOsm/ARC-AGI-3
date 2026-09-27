@@ -7,7 +7,7 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -19,20 +19,14 @@ jobs:
           path: environment_files
           key: arc-games-${{ hashFiles('Makefile') }}
 
-      - name: Setup (venv, pinned arc-agi, framework @ Kaggle's commit)
+      - name: Setup (venv, pinned arc-agi, dev tools)
         run: make setup
 
-      - name: Starter smoke test (also downloads ls20 + vc33)
-        run: make verify-local
+      - name: Game sources
+        run: make games
 
-      - name: Lint + agent/my_agent.py freshly built from agent/brain/
+      - name: Lint + type-check
         run: make check
 
-      - name: Interface facts the agent depends on
-        run: make interface
-
-      - name: HUD-counter masking on the smoke games
-        run: .venv/bin/python eval/mask_check.py ls20,vc33
-
-      - name: Smoke regression vs logged champion baseline (process + swarm)
-        run: .venv/bin/python eval/regression_check.py
+      - name: Tests (no GPU, no network)
+        run: make test

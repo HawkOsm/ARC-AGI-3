@@ -4,6 +4,305 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-27 — Kaggle run D: our agent after the interface fixes + old-brain pieces (server crashed mid-run)
+- Change: run C's settings (Flash-Next, context 12K) with prefix cache off, and the agent from 803ddcb (interface
+  fixes, step-counter memory, no-op refusal, `changes()`, `memory`). Pushed by the owner (`hawkosm/arc3-agent` v2).
+- Result: **2.70 / 16 levels** (run C 1.11 / 11; run A 9.81 / 38): ft09 3 levels (23.81), vc33 2, tu93 2; tool
+  errors 11% (run C 20%). BUT the model server died of **CUDA out of memory** at 15:50, ~38 min into play (max 28
+  requests at once; the public notebook uses 8), and with no watchdog every game spent the remaining ~90 min on
+  "connection refused" (927 failed requests per game). The score covers ~38 of 130 minutes.
+- Fixes: `--max-seqs` default 8 (the public notebook's measured-safe value); the fork's `vllm_server_watchdog`
+  started after setup (4 failed health checks -> restart, at most 2); our own restarter for the 27B path. Also found
+  with a local competition-mode arc_agi server: scored mode crashed every game (`make()` -> None); fixed (50d693c).
+- Verdict: BETTER than run C but INVALID as a measurement (server died); submission built from the fixed code.
+
+## 2026-09-27 — Local old-vs-new: interface fixes + old-brain pieces (no GPU)
+- Change: old = run C's `agent/model.py` (6973088); new = the run-C fixes (pixels as cell lists, `.rows`/`.at`,
+  preloaded modules, hashlib, no files, temp folder) + old-brain pieces (step-counter `Hud`, screen map that refuses
+  known no-ops, life lengths, `changes()`, `memory`, frame deltas) (c7b73f6).
+- Command: `.claude/scratch/agent/localab/run.sh` — both versions on ar25, ls20, vc33, ft09, tn36, sc25, 8 min each,
+  3 at once, AGENT_CONTEXT=12000, AGENT_MAX_TOKENS=8192, local Qwen3.5-4B; `compare.py`.
+- Result: tool calls that errored **80/491 (16%) -> 5/294 (2%)**; calls per turn **3.19 -> 1.27** (the Duck ~1.0);
+  actions 114 -> 222; turns 154 -> 232; levels 0 -> 0 (the 4B).
+- Verdict: BETTER on what it measures (interface errors, calls per turn, actions) — one run each on the weak local
+  model; the score question needs Kaggle (next run: same settings as run C, prefix cache off).
+
+## 2026-09-27 — Kaggle run C: our `agent/model.py` on Flash-Next, context 12K, prefix cache on
+- Change: first Kaggle run of our own agent (`notebooks/agent/build.py --model flashnext --context 12000
+  --prefix-cache`, pushed by the owner as `hawkosm/arc3-agent`). Differences from run A: our rewrite of the agent,
+  12K conversation budget (run A ~20K per call), prefix cache on. Same model, cache size (5 GiB), 130 min per game.
+- Result: **1.11 / 11 levels** (run A: 9.81 / 38). Server ready after 1122 s (normal; the `server_start_s` field in
+  results.json wrongly held the whole session, fixed). Serving: 4.8 requests running at once (run A 3.1), 19.9 waiting
+  (21.5), 324 generated tokens/s (250): the shorter context helped ~+30%. **Prefix cache hit rate 0%** — the cache
+  stays ~92% full, so nothing survives to be reused: no gain. The agent was the problem: 1780 model calls but only 609
+  turns (2.9 calls per turn; run A ~1.0) and 1515 actions (run A 3900); **357 of 1780 tool calls errored (20%;
+  run A 5%)** — our sandbox interface: `len(node['pixels'])` on a count (75), `Counter` not imported (63), string
+  indexing of `.ascii` (58), `hashlib` blocked (41), `entry.ascii` (9). The model also wrote a file (`f_snap.txt`)
+  into the notebook's folder: the sandbox allowed `open()` and ran in the working folder.
+- Fixes (local, tests 9/9): `pixels` = list of [row, col] cells + `size`; `.rows` and `.at(r, c)`; history entries
+  forward frame attributes; Counter / defaultdict / deque / heapq / itertools / math preloaded; hashlib allowed;
+  `open()` blocked and each call runs in its own temp folder; prompt spells out shapes and says to inspect and act
+  in the same call.
+- Verdict: WORSE (1.11 vs 9.81) — caused by our agent's interface, not the throughput settings; re-run needed after
+  the fixes. Prefix cache: NO GAIN at this cache size.
+
+## 2026-09-27 — Our Kaggle notebook for `agent/model.py`, with the throughput levers as settings (built, not run)
+- Change: `notebooks/agent/runner.py` + `build.py`: serve the model (`flashnext` = the public Duck fork's serving
+  script, unchanged, tuned via TAAF_VLLM_*; `qwen27b` = our vLLM wheelhouse + tool calls + vision), play every game
+  at once with `agent/model.py`, write `results.json` + traces; scored runs play Kaggle's game server (one scorecard,
+  per-game time shrunk to fit 9 h if there are more games than parallel slots). `agent/model.py` gained
+  `open_arcade(mode)` (offline / competition) and `--out`. Settings: `--context` (default 12000), `--prefix-cache`
+  (default on), `--model`, `--max-seqs` 28, `--kv-cache-bytes` (default 5 GiB as run A), `--kv-cache-dtype`.
+- Command: local dry run of the notebook's agent + play cells against `make llm-local` (ls20 + vc33, 1 min each,
+  Kaggle paths mapped to scratch folders); `make test`.
+- Result: both games played in parallel; `results.json`, traces and the placeholder `submission.parquet` written.
+  The dry run caught a crash (division by zero) when the arcade lists no games; now a clear error. 8/8 tests pass
+  (incl. both notebook variants building with the right inputs).
+- Verdict: INFO — ready to push; no Kaggle run started (owner: collect ideas first).
+
+## 2026-09-27 — Analysis of Kaggle run A (no new run): where the public Duck's time and actions went
+- Command: `python3 .claude/scratch/duck/analysis/analyze_run.py .claude/scratch/duck/kaggle_a1` (events, transcripts,
+  benchmark.json, vLLM metrics and log of run A).
+- Result: 1358 model calls, 1324 turns, 3900 actions, 25 games, 2.2 h per game. Per call: 143 s end to end = **124 s
+  queue** + 1.6 s prefill + 16.7 s decode; ~20k prompt tokens and ~1.5k generated tokens per call; prefix cache off
+  (0 hits; 27.3M prompt tokens); 121 preemptions. Server: weights 81.8 GiB, KV cache fixed at 5 GiB = 105,202 tokens
+  (≈5 calls of 20k at once), max 8 sequences, model load 851 s. Each game got ~53 calls (~150 s per turn); 24/25 games
+  used their whole time. Once a level is understood it is efficient (ft09 L1 4 actions vs baseline 43; vc33 8/7,
+  8/18). 314/3900 actions changed nothing on the board (ar25 169/409); 34 game-overs (sp80 11, tn36 7, tu93 6);
+  63 tool results with errors; 24 request timeouts; 14 replies cut at the length limit.
+- Verdict: INFO — the bottleneck is thinking time per game (queueing for a small KV cache), not actions. Ideas ranked
+  in IDEAS_TRIED "Ideas to test next".
+
+## 2026-09-27 — One-file Duck (`agent/duck.py`); the brain-first codebase deleted
+- Change: owner decision "LLM first, algorithms later; simplify". New `agent/duck.py` (~620 lines): our own rewrite
+  of the Duck design (python tool whose code calls `action(...)`, segmentation view, before/after frames, the model's
+  world-model notes carried between turns, context fitting that never drops the newest user message, only the newest
+  screen image kept). Deleted: `agent/brain/` + `agent/my_agent.py`, `eval/` (runners, dashboard, replay viewer,
+  champion), `experiments/`, `vendor/duck/`, `scripts/`, old tests, `notebooks/duck_hints`, ROADMAP / STARTER_README /
+  design docs. Kept: research + test docs, `notebooks/llm_prep` + `llm_dev` (to be pointed at duck.py),
+  `notebooks/duck_repro` (Kaggle template). Tracked Python: ~13,000 lines of our own code -> ~620 (+ 100 of tests).
+- Command: `make check test`; `DUCK_TRACE_DIR=.claude/scratch/duck/ours_ar25 .venv/bin/python -m agent.duck --games ar25
+  --minutes 10 --concurrency 1` against `make llm-local` (Qwen3.5-4B, 32K, vision + tool calls).
+- Result: 5/5 tests pass (sandbox actions + import block + time limit, context fitting, game wrapper, a whole turn with
+  a fake model on ls20 — which caught a bug: batched actions were summarised as only the last one). ar25 on the 4B:
+  14 turns, 24 tool calls, 13 actions, 0 request errors, 0 levels, official scorecard read back. The 4B wrote no
+  "World model:" lines (its reasoning stays in the thinking channel).
+- Verdict: INFO — plumbing works end to end locally; the score question needs the Kaggle model.
+
+## 2026-09-27 — Kaggle run A: the public Duck (Qwen3.8-Flash-Next NVFP4) unchanged — our baseline for the Duck
+- Change: none — `notebooks/duck_repro` = the public notebook `keithtyser/duck-qwen3-8-flash-next-nvfp4-mtp` (Tufa Labs
+  Duck harness, MIT) pushed as `hawkosm/duck-flashnext-repro` (owner OK). RTX PRO 6000, 25 public games at once,
+  ~2.2 h per game, no action cap. Model server ready after 1070 s.
+- Result (the harness's own scorer, `score.json`): **9.81**; **38 levels** (ft09 6/6 = 100, re86 4, ar25 3, vc33 3,
+  ka59 2, lf52 2, m0r0 2, s5i5 2, tu93 2; 0 on sc25, sk48, sp80, tn36); 3900 actions; every game but ft09 used its
+  whole time budget. Session ~2.8 h. For comparison our step 2 (local 4B, 200 actions): 10–12 levels; it beats the
+  Duck on sc25 (2 vs 0) and tn36 (1 vs 0). Outputs: `.claude/scratch/duck/kaggle_a1/`.
+- Verdict: INFO — the Duck on the public games; baseline for run B (the same + our `brain_hints`). The leaderboard
+  "~5" of this notebook is on the hidden games.
+
+## 2026-09-26 — Steps 4 and 5: fallback exploration, known-test filter, event-based asking (hypothesis mode)
+- Changes, in order (frozen builds in `experiments/2026-09-26_hyp_step{4,4b,5_events,5b}/`):
+  step 4 — a click test with no coordinates clicks a cell of `test.object` (before: every click test was dropped, so
+  7 click-only games had 0 LLM actions); when nothing is steered the brain steers toward its own best goal
+  (`Brain._own_goal`); "reach" goals from LLM roles (goal / collectible / switch); a test predicting a key effect
+  the control map already shows is not run. Step 4b — also not run: an action already taken on this screen, a click
+  on an object whose click did nothing this level (Reki's "dead-signature"). Step 5 — the LLM is asked only on
+  events (probes done, surprise, goal reached without a win, steering stopped, wrong prediction, life lost, 3+ new
+  screens while exploring); `LLM_ASK_EVERY` removed. Step 5b — "wrong prediction" dropped as an event.
+- Command: `ARC3_LLM_MODE=hypothesis eval/run.py --agent <frozen build> --swarm --max-actions 200 --seed S` (local
+  Qwen3.5-4B), plus two more runs each of step 2 and step 3 for the noise level.
+- Result (mean score over 25 games per run; levels): step 2 0.690 / 0.688 / 0.711 (11 / 10 / 12 levels); step 3
+  0.519 / 0.728 / 0.572 (9 / 10 / 8); step 4 0.383 (10); step 4b 0.538 (10); step 5 0.441 (8); brain alone 0.251
+  (6). Fallback exploration: 69% of actions (step 3), 72% (4b), 67% (5). Step 4's loss is the LLM choosing clicks:
+  tn36 clicked one inert object 10 times (level 1 ~80 actions vs 26–29). Step 5's: a wrong prediction asked again at
+  once, giving runs of 3–4 LLM clicks (tn36 0 levels). lp85 differences are the explorer picking the left or right
+  rotate button (luck), not these changes.
+- Step 5b, three runs: 0.728 / 0.511 / 0.632 (11 / 7 / 9 levels), mean 0.624 — the same as step 3 (0.606), below
+  step 2 (0.697). First run was lucky (cn04 won a level for the first time, 4.76). Step 2 is also the most consistent
+  per game (sc25 2/2/2 levels, vc33 2/2/2, tn36 1/1/1; step 5b sc25 2/0/1, tn36 1/1/0). Note: in step 2 every LLM
+  click test was dropped (the missing-coordinates bug), so on click-only games step 2 = probes + the brain's explorer.
+- Step 5c (the LLM explains and picks goals but does not click in click-only games; build
+  `experiments/2026-09-26_hyp_step5c/`), three runs: 0.524 / 0.633 / 0.587 (8 / 10 / 10 levels), mean 0.582 — also
+  below step 2; "the LLM clicking" does not explain step 2's lead.
+- Verdict: NO GAIN — nothing after step 2 beats it on the 25-game score (run-to-run spread about ±0.1). The
+  mechanisms work where they apply (ar25 selection, click tests with object names, event reasons in the replay);
+  on the aggregate the LLM's own actions cost more than they find.
+
+## 2026-09-26 — Step 3: control modes (selection), level lessons, surprises → LLM, several targets
+- Change: `agent/brain/control.py` `ControlMap` — control modes (which object each key moves), switches (a click /
+  ACTION5 that changed something; the next key press shows the mode), how to select an object (click it if clicks
+  select, else the switch key); `agent/brain/lessons.py` `GameLessons` — how each level was won (mover colour →
+  target colour, controls), NEW / CHANGED objects vs earlier levels; object question gets WHAT FINISHED EARLIER
+  LEVELS, news, control modes, goals already reached, SURPRISE; a click / switch doing something never seen in the
+  game → one key press to see what it produced, then the LLM is asked at once (owner: "when a click does something new
+  the LLM should decide"); a probe switch always gets that key press; steering selects its mover first; arriving
+  while more target-like objects of the target's colour remain = DONE (kept, next goal); an LLM test that would move a
+  placed piece is skipped; shapes compared with holes filled (ar25's dotted pieces vs solid outlines); goal list
+  won-colour boosts; `Controls` removed. Fixes found in the debug runs: endless key presses after a no-op select,
+  arrow keys counted as switches, marker changes read as a 21-cell jump (click not seen as a switch), bottom bar and
+  step counter counted as "more targets", LLM tests interrupting steering.
+- Command: `eval/debug_run.py ar25 --hypothesis --steps 300 --trace` (7 runs); then
+  `ARC3_LLM_MODE=hypothesis eval/run.py --swarm --max-actions 200 --seed 0 --label hyp3_local_200` (local Qwen3.5-4B).
+- Result: ar25 debug (last run): level 1 in 26 actions, level 2 in 35, level 3 not solved (the L piece's outline lies
+  across the mirror line: the mirror must move first). 25 games, 200 actions, one run each:
+  **step 3 0.519 / 9 levels** vs step 2 0.690 / 11 vs brain 0.251 / 6. Per game: sc25 2→0 levels, vc33 2→1, lp85
+  2.78→0.06, bp35 0→1, r11l 0.11→0.85; ar25 level 1 took 50 actions in the swarm run vs 26 in the debug run (same
+  code). In both LLM runs 110–130 of the 200 actions are the brain's fallback exploration.
+- Verdict: INCONCLUSIVE — one run per arm with a sampling LLM; more runs of both arms queued.
+
+## 2026-09-26 — Step 2 on all 25 games (hypothesis mode, local 4B, 200 actions)
+- Command: `ARC3_LLM_MODE=hypothesis eval/run.py --swarm --max-actions 200 --seed 0 --label hyp_local_200`
+- Result: **0.690 / 11 levels** vs brain alone 0.251 / 6 (`brain_swarm_200`). Gains: ar25 0→2 levels, sc25 0→2,
+  tn36 0→1, vc33 1→2, lp85 0.10→2.78; losses: bp35 1→0, m0r0 4.76→0.93, lf52 0.31→0.13. 0 errors, 1493 s wall.
+- Verdict: INFO — one run; first sign the object pipeline beats the brain outside ar25.
+
+## 2026-09-26 — Step 2: probes, steering toward the picked goal, switch discovery — ar25 levels 1 and 2 solved
+- Change: `agent/brain/steer.py`: `Prober` (level start: each key once, one click per object kind — owner's "click
+  to explore"); `Controls` (latest effect of each key on an object; frames where it was reshaped/hidden are no
+  evidence); `Navigator` (BFS over positions the learned steps reach, around blocked moves, nearest reachable if not
+  exact); `Steerer` (follows the plan to put the mover's centre on the target's, checks each move, replans; when a
+  whole direction is missing it tries ONE switch at a time — ACTION5 or clicking the objects involved — then re-tests
+  the keys; gives the goal up if arriving does not finish the level). LLM roles kept as object purposes in later
+  questions. No LLM calls while steering.
+- Command: `eval/debug_run.py ar25 --hypothesis --steps 200 --trace` (6 runs while fixing: a KeyError when a key's
+  effect changed mid-plan; false "blocked" + 45 wasted unlock moves; lost tracking when the L overlaps the target).
+- Result (final run): **ar25 level 1 in 27 actions (human baseline 32) and level 2 in 26 (baseline 50)** — both
+  capped at 115 per level; 0 lives lost; level 3 not solved by step 200. Level 2 needed the switch: the keys moved the
+  mirror line until ACTION5 (or clicking the black shape — confirmed by hand in the engine) made ACTION1/2 move the
+  shapes; the steerer found it by itself. The brain alone never finished ar25 level 1 (0 levels in every run).
+- Verdict: INFO — first game solved by the object/goal/steer pipeline; not yet measured on the other 24 games.
+
+## 2026-09-26 — Goals as a ranked list of shape correspondences; the LLM picks (local 4B, ar25)
+- Change: owner's direction — goals come from object purposes and shapes, not a list of genres. `shapes.py`: pairwise
+  correspondences between object kinds (identical / turned or flipped / scaled / fills a gap / fits inside / same
+  colour), bounded (kinds, not pairs; <=3 relations per object; cached per level). `goals.py`: `GoalTracker` renamed
+  `Goals` (owner); `GoalBoard.possible_goals()` = correspondence pairs (+ "clear all copies" for kinds with >=3
+  copies), ranked by shape strength x reacts-to-actions x LLM picks x relation kinds that held at earlier wins;
+  `Goals.purposes()` (how each object reacted per action), `Goals.progress_text()`. The object question now shows the
+  ranked list and purposes; the answer has `goal_choice` (a number, 0 = none); the pick re-ranks the list.
+- Command: shape relations on all 25 first screens (timing); `eval/debug_run.py ar25 --hypothesis --steps 80`.
+- Result: first version of the relations exploded (tr87 521 relations, 216 ms: rectangles "fit" every frame) ->
+  tightened (irregular pieces only for fills-gap, snug fits-inside, 3 per object): worst tr87 41 relations, 118 ms,
+  most games < 20 ms. ar25: the brain's list has "#5 and #6 overlap (same shape)" at #1 from the first screen; the 4B
+  model **picked it in 15 of 20 answers** (before the list it never named the yellow block in 40 answers) and named
+  #5 as controlled. Prompt median 2,267 tokens (hex question ~4,700), answers 4.3 s median. Progress for the picked
+  goal: distance 33-55 -> 4.2 cells, box overlap 1.00 near the end by chance (the brain still explores; step 2 steers).
+  Tests 7/13 correct this run. 0 levels.
+- Verdict: INFO — the right goal is now found and picked on ar25; next: steer the brain toward it (exact coverage,
+  not box overlap). `_is_just_moving` removal (owner) still pending, as its own measured change (it alters the default
+  brain's win learning).
+
+## 2026-09-26 — Hypothesis mode, step 1 (object questions + tested predictions), local 4B on ar25
+- Change: `agent/brain/scene.py` (numbered objects with ids kept through movement, twins, partial covering and
+  splits; composites = parts that moved together touching >=2 times and never apart; relations: mirror images across
+  a line, same size/shape in different colours; per-action effects). `ARC3_LLM_MODE=hypothesis`: every 4 brain
+  actions the brain asks the object question; the answer (JSON schema) gives rule, controlled ids, goal, roles and ONE
+  test action with a predicted effect; the brain runs the test and judges it (`Lab.check`); verdicts feed the next
+  question. Debug runner `--hypothesis --show-question`; traces carry verdicts; 5 new tests (35 total).
+- Command: `eval/debug_run.py ar25 --hypothesis --steps 80 --trace` (4 runs while fixing the tracker).
+- Result: owner's reading of ar25 = grey L (controlled) mirrored as a black L across the light-blue line, goal = cover
+  the yellow 9x9 block. The brain's own scene finds "#7 is where #5 would be mirrored across #2" and "#5, #6 same
+  shape". Tracker fixes were needed (twins matched by common displacement; ids kept when partly covered; strict
+  composites — a loose rule merged the mirror line with the L). Final runs: tests 13/7 and 9/10 correct/wrong over
+  ~20 questions; the model converges to the right controls ("ACTION3 moves #5 right and the black group left, ACTION4
+  the reverse") but never names the yellow block as the goal ("#15 covers #5", "#5 returns to its uncut state");
+  the same-shape relation disappears once #5 is partly covered, so later questions lose that clue. 0 levels in 80 steps
+  (the brain still chooses all non-test actions; step 2 would use the goal).
+- Verdict: INFO — the object question gets the mechanics right where the hex question never did (9,292 v5 answers,
+  no mirror); goal inference is the open problem.
+
+## 2026-09-26 — GPU dev run v5 (27B, no thinking, structured JSON): reliable answers, far worse play
+- Change: structured JSON output + compact JSON + `--language-model-only` (agent from before the in-flight limit).
+- Command: `notebooks/llm_dev/build.py --arm nothink:0:5400 --max-actions 1000`; brain reference via
+  `brain_at_same_actions.py` (advisor-off replay per game, seed 0, same action counts).
+- Result: 9,292 requests, **0 errors, 9,292/9,292 finish=stop**, median 12.7 s (p90 16.9 s), ~94 tokens. The LLM chose
+  **98%** of actions (19,313 / 19,723). **LLM 1 level / 0.094 vs brain 17 levels / 0.682 at the same per-game actions.**
+  Answers: 1,800 distinct plans in 9,292; the most common are one key repeated ("ACTION4" x8: 691, x4: 433,
+  "ACTION1" x8: 298); theories mostly guess a genre ("Sokoban-style"); "mirror"/"reflect" 0 times in 9,292.
+- Verdict: ❌ an LLM that drives from a stateless hex prompt is much worse than the brain. v4's 12 levels came
+  mainly from brain actions filling in for failed answers. Next step to be chosen by the owner from the replays.
+
+## 2026-09-26 — Local 4B LLM fully in charge (after the queueing fix) + ar25 debug run
+- Change: advisor with an in-flight limit (8 locally) so the opening burst no longer times out and pauses it;
+  `eval/debug_run.py` / `make debug` (one game, a printed block per decision: action, who/why, options weighed,
+  result); prompt fix: first-look guesses were presented to the LLM as "Earlier wins came with ...".
+- Commands: `make eval-llm BUDGET=200` (25 games, swarm, seed 0) vs `eval/run.py --swarm --max-actions 200 --seed 0`;
+  `eval/debug_run.py ar25 --llm --steps 120 --trace`.
+- Result: **LLM 4B: 2 levels / 0.170 vs brain 6 levels / 0.251** at 200 actions per game. ar25 with the LLM: all 120
+  actions from the LLM (77 questions, 453 s), 0 levels, 64/120 actions changed nothing; its theory never mentions the
+  mirror/reflection (owner's reading of ar25: a grey L-shape and a yellow goal mirrored across a middle line) and kept
+  citing "previous wins" that were only the first-look guess (prompt bug, fixed + test).
+- Verdict: ❌ the 4B model in charge is worse than the brain; kept only as a development stand-in.
+
+## 2026-09-26 — Visibility: tests, Run Board, Agent Replay (owner: "I need to see what is going on")
+- Change: `tests/` (pytest, 29 tests: model, reader, advisor against a fake server, brain playing ls20/vc33; `make test`,
+  in `make ci` and GitHub CI). `eval/dashboard.py` → Run Board page. `agent/brain/trace.py` + `eval/trace_viewer.py` →
+  Agent Replay page (every step: screen, action, who chose it and why, what it did, LLM theory). The explorer now
+  records a reason per action (`WorkingMemory.why`), the advisor returns `Advice(plan, theory)`, LLM request logs
+  carry the game id. None of this changes a decision (tests + identity below).
+- Commands: `make test`; tests mutation-checked (removing the in-flight limit / accepting illegal plan actions each
+  turned a test red); `ARC3_TRACE_DIR=.claude/scratch/trace/brain_300 eval/run.py --swarm --max-actions 300 --seed 0`.
+- Result: 29/29 pass. Brain traces, 25 games x 300 actions (3.5 MB): share of actions that changed nothing —
+  ft09 82% (37 in a row), su15 67%, cd82 53%, tn36 51%, sb26 46%, sk48 44% (35 in a row); most games lose 2+ lives
+  (step counter) in 300 actions; 10 levels total (0.291).
+- Verdict: INFO — tools for the owner to decide the next step from what the agent visibly does.
+
+## 2026-09-26 — GPU dev run v4 (27B): thinking is unusable; no-thinking LLM ≈ brain at equal actions
+- Change: agent with advisor (pre-structured-output, pre-refactor; advisor-off play identical to the champion).
+  Arm `nothink` 5,400 s, then arm `think` (16,384 tokens, 1,200 s timeout) 2,700 s, same server.
+- Command: `notebooks/llm_dev/build.py --arm nothink:0:5400 --arm think:1:2700 --max-actions 1000`; brain reference:
+  `.claude/scratch/llm/kaggle/brain_at_same_actions.py` (each game replayed advisor-off, seed 0, same action count).
+- Result: server up in 270 s.
+  - `think`: 109 requests, **97 finish=length at 16,384 tokens**, median **685 s**/answer; 20 advised actions in 45 min; 0 levels.
+  - `nothink`: 3,525 requests, 0 errors, **2,057 (58%) finish=length at 1,024 tokens** (prose, no plan), median 46.5 s;
+    2,772 of 10,997 actions advised; 337-691 actions per game in 90 min.
+    **LLM 12 levels / 0.267 vs brain 11 levels / 0.292 at the same per-game actions** (n=1 seed). LLM-only levels:
+    cd82, s5i5, tn36 (3.57); r11l 0.92 vs 0.12. Brain-only: ar25, ls20; m0r0 4.76 vs 0.29 (efficiency).
+  GPU quota after v4: see `kaggle quota`.
+- Verdict: INFO — thinking mode is out (9/10 answers never finish). No-thinking plays about as well as the brain even
+  with most answers wasted; structured output (found locally the same day) should fix that. Next Kaggle run: schema
+  + compact JSON + `--language-model-only`, nothink only.
+
+## 2026-09-26 — Local dev LLM (RTX 4070 8 GB) + structured JSON answers
+- Change: `make llm-local-setup` / `make llm-local` / `make eval-llm`: vLLM 0.30.0 (same as Kaggle) in `.venv-llm/`,
+  model `cyankiwi/Qwen3.5-4B-AWQ-4bit@ef85d23beb` (4.0 GB, Apache-2.0; Qwen3.8 is built on Qwen3.5) in `models/`,
+  `--language-model-only --max-num-seqs 32 --max-num-batched-tokens 4096` (the defaults ran out of memory while
+  profiling CUDA graphs: tried to allocate 4.12 GiB). Server up in ~135 s; 5.7 of 8 GB used; KV cache 47,427 tokens.
+  Advisor: vLLM structured outputs (`response_format` json_schema: theory ≤400 chars + plan of 1-8
+  `ACTION[1-7]( x y)` strings), JSON-only instructions, and the prompt now says every action counts.
+- Command: `.claude/scratch/llm/local/smoke.py ls20,vc33,ft09[,sp80]` (first-screen prompts, thinking off)
+- Result: before: **3/3 answers hit the 1,024-token limit** reasoning in prose (counting hex digits) and never
+  produced a plan, 17.4 s each (~60 tokens/s single stream). After: **4/4 parse**, 2.1-6.0 s, 80-196 tokens,
+  finish=stop.
+- Verdict: INFO — local loop works; the same prose failure is likely on Kaggle without the schema (v4 was pushed
+  before this fix). Brain-only reference for the local run: swarm, seed 0, 200 actions: 0.251 / 6 levels.
+
+## 2026-09-26 — PLAYABLES step 1 (game mode, one click per kind, keys-first in mixed games): rejected
+- Change: `GameMode` from the offered actions; click candidates tagged with their item kind and a per-kind
+  click tally (`CLICK_TALLY_BY_KIND`); click priors x0.5 in MIXED games (`MIXED_MODE_CLICK_PRIOR_FACTOR`).
+  Both switches off = 50/50 identical to the champion (plumbing check).
+- Command: `eval/run.py --agent eval/champion/my_agent.py --variant kind=... --variant mixed=... --variant both=... --reps 30 --max-actions 1000`
+- Result (reference 0.574 / 16.80 levels per rep): kind −0.029 ± 0.053 / −0.33 ± 0.75 (no effect);
+  mixed **−0.064 ± 0.054** / +0.50 ± 0.60; both **−0.091 ± 0.067** / +0.07 ± 0.82. Per game (levels):
+  kind s5i5 +0.67, r11l +0.33, lp85 −0.40, sc25 −0.63; mixed bp35 −0.43, sc25 +0.63, sp80 +0.23.
+  Also measured first (`.claude/scratch/design/count_check.py`): every action counts on the scorecard,
+  including a legal click on background and a button the game doesn't offer (5/5 in all 25 games).
+- Verdict: ❌ both behaviours deleted (ablation rule); `GameMode` / `world.mode` kept (no decision uses it;
+  step 2 builds on it). After the revert: 50/50 identical to the champion again.
+
+## 2026-09-26 — Refactor: agent/brain in "Python like Java" (behaviour-identical)
+- Change: owner request. Dict beliefs → typed classes (`CounterMemory`, `AvatarBelief`, `ColourRoles`, `Kind`,
+  `Pattern`, `Item`, `ActionBeliefs`, `Rules`, `Goal`, `Death`, `WorkingMemory`), strings → enums (`Outcome`, `Role`),
+  tuples → records (`Action`, `ClickInfo`); free functions → classes with explicit dependencies (`ScreenReader`,
+  `FirstLook`, `CounterLearner`, `AvatarLearner`, `TouchLearner`, `ActionLearner`, `DeathJudge`, `ScreenFeatures`,
+  `GoalTracker`, `Explorer`, `PromptWriter`). mypy added to `make check` / CI (clean). explain.py, mask_check.py updated.
+- Commands: `eval/run.py --champion eval/champion/my_agent.py --reps 2 --max-actions 1000`; `make ci`;
+  mock-LLM run (5 games x 2 reps, 10% failures + 10% garbage); swarm timing x2 each.
+- Result: **50/50 runs identical** to the champion, 0 errors. CI: 11/11 interface, 9/9 masks, regression PASS 1.1812.
+  Mock LLM: 1,709 advised actions, 0 errors. Swarm (25 threads, 25,025 actions, same score 0.682): **107.8 / 109.6 s
+  vs champion 103.7 / 101.6 s → ~6% slower per action** (still ~4.3 ms/action).
+- Verdict: INFO — pure restructure; the 6% is accepted for now (the brain is stuck, not time-limited), profile later.
+
 ## 2026-09-26 — GPU dev run v3: server up, but every thinking answer ran out of tokens
 - Change: v2's sampler/CUDA_HOME fix. nvcc seen: system **12.8** (too old for sm_120), server 13.4 (wheelhouse).
 - Result: server up after 300 s. Games 477 s, aggregate **0.6816 / 17 levels** — the same as the local

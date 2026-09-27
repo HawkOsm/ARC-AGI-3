@@ -9,6 +9,16 @@ Kaggle or more data) · ⚠️ scorer-dependent
 
 ---
 
+## Ideas to test next (collected; none run yet)
+
+| idea | why | how to test | setting / status |
+|---|---|---|---|
+| **More thinking per game** — the run was starved: 87% of each call was queue wait (124 of 143 s); the model weights (81.8 GB) left a 5 GB cache = 105k tokens, so only ~5 of 25 games could think at once; each game got ~53 model calls in 2.2 h and 24/25 ran out of time | run A analysis (LOG 2026-09-27) | (a) shorter conversations per call (avg prompt 20k tokens; a 10–12k budget ≈ 2× games at once); (b) the smaller Qwen3.8-27B-FP8 (~27 GB weights → ~60 GB cache, all games at once, weaker per call); (c) prefix cache on (it was off: 27.3M prompt tokens re-read) | run C (LOG 2026-09-27): context 12K → 4.8 running vs 3.1, +30% tokens/s; prefix cache 0% hits (cache full) ➖; the 27B and fp8 cache untested |
+| Fewer wasted actions: 314 of 3900 actions (8%) changed nothing on the board (ar25: 169 of 409) | run A analysis | refuse repeating an action that did nothing on the same screen (force to override) | built 2026-09-27 (`Memory`, from the old brain's screen map) |
+| Fewer game-overs mid-experiment: 34 in total (sp80 11, tn36 7, tu93 6); sp80's notes blame "mid-sequence restarts" for corrupted measurements | run A analysis | step counters learned and hidden (old CounterLearner); actions per life and earlier life lengths shown each turn | built 2026-09-27 |
+| More actions per call: only ~1/3 of actions ran in batches | run A analysis | prompt: plan a sequence and batch it once confident | prompt |
+| Screen in each message as letters instead of an image (owner) | text grids may be easier for an LLM than pictures (one unverified paper: 80–86% vs 16–34%); the Duck sends both | same games and budget, `AGENT_SCREEN=text` vs `image` (also `both`, `none`) | `AGENT_SCREEN`, ready |
+
 ## State identity
 
 | idea | verdict | evidence | notes |
@@ -25,6 +35,9 @@ Kaggle or more data) · ⚠️ scorer-dependent
 | One click target per colour component (centroid-nearest cell) | ❌ | LOG 2026-09-25 click lattice | ft09/lp85 stall: the clickable unit is a sub-part of a connected component. |
 | Lattice click points inside large components + whole-grid refinement (stride 4→2→1) when a state is exhausted | ✅ | LOG 2026-09-25 click lattice | lp85 1.0→2.5 levels, tn36 0→1. ft09 still 0 (combinatorial). |
 | More action budget (1000 → 5000) with the pre-lattice floor | ➖ | LOG 2026-09-25 budget | 0.546 → 0.415, within noise: the agent is stuck, not budget-limited. |
+| "Free" probing with no-op / unavailable actions (owner's hypothesis) | ❌ (by measurement) | LOG 2026-09-26 count check | Every action counts on the scorecard, including background clicks and buttons the game doesn't offer (5/5 in all 25 games). |
+| Click chance learned per item kind (colour + shape) instead of per colour — "one click per kind before twins" (PLAYABLES step 1) | ➖ removed | LOG 2026-09-26 step 1, N=30 | Δscore −0.029 ± 0.053, Δlevels −0.33 ± 0.75. Splits evidence thinner than the per-colour tally. |
+| Mixed games (keys + clicks): halve click priors so keys go first (PLAYABLES step 1) | ❌ removed | LOG 2026-09-26 step 1, N=30 | Δscore **−0.064 ± 0.054** (levels +0.50 ± 0.60, n.s.): the tallies already learn fast; the prior only delays needed clicks (bp35 −0.43 levels). Both together −0.091 ± 0.067. |
 
 ## Beliefs about the game (owner's World design, 2026-09-25)
 
@@ -55,3 +68,22 @@ Kaggle or more data) · ⚠️ scorer-dependent
 | idea | verdict | evidence | notes |
 |---|---|---|---|
 | Replay after level-up (full reset, replay known shortest solutions, explore on) | ⚠️❌ | LOG 2026-09-25 replay + kaggle_sim | Local non-competition scorer: +3.86 ± 1.16 (6 games, n=2); kaggle_sim 9.76 vs 1.36. Under a **competition-mode** gateway the level-start RESET is intercepted → plays=1, gain gone. Kaggle's gateway almost certainly runs competition mode. Rejected unless a Kaggle-side observation says otherwise. |
+
+## Local LLM advisor (Phase 3)
+
+| idea | verdict | evidence | notes |
+|---|---|---|---|
+| Qwen thinking mode as the advisor | ❌ | LOG v3, v4 | 27B: 9/10 answers never finish even at 16,384 tokens (685 s median). |
+| LLM drives (stateless prompt: beliefs + 16 steps + hex screen), brain only on solved levels / failures | ❌ | LOG v5 | 27B with reliable JSON answers: 1 level vs brain 17 at equal actions; 4B locally 2 vs 6. Plans mostly one key repeated. |
+| Structured JSON output (vLLM json_schema, compact) | ✅ plumbing | LOG local + v5 | 3/3 → 0% prose failures; 9,292/9,292 clean answers on Kaggle. |
+
+## Who decides: brain vs LLM (2026-09-26/27)
+
+| idea | verdict | evidence | notes |
+|---|---|---|---|
+| LLM picks every action from a hex screen (drive mode) | ❌ | LOG 2026-09-26 (Kaggle v5, local 4B) | Worse than the brain alone (4B: 2 vs 6 levels). |
+| Brain in charge; LLM explains objects and picks a goal from the brain's shape list; brain steers (hypothesis mode, step 2) | ✅ then superseded | LOG 2026-09-26 | 0.697 / 10–12 levels over 3 runs vs brain 0.251 / 6. |
+| + control modes, level lessons, surprises → LLM, several targets (step 3); own goals, click tests by object (4/4b); event-based asking (5/5b/5c) | ➖ | LOG 2026-09-26 | None beat step 2 (0.38–0.62). The LLM's own clicks cost more than they found. |
+| Brain findings as `brain_hints` for the Duck's model | ⏳ dropped | LOG 2026-09-27 | Built and verified in the sandbox; Kaggle A/B not run; brain deleted (owner: LLM first). |
+| **LLM writes Python that plays (the Duck, Tufa Labs)** | ✅ | LOG 2026-09-27 run A | Public notebook unchanged: 9.81 / 38 levels on the 25 public games. Our rewrite: `agent/duck.py`. |
+

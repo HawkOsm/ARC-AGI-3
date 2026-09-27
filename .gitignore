@@ -7,7 +7,7 @@ __pycache__/
 *.pyc
 
 # Vendored framework + downloaded game source + agent recordings
-vendor/
+vendor/*
 environment_files/
 recordings/
 logs.log
@@ -28,3 +28,7 @@ eval/results/
 
 # Downloaded model weights (large; see models/README if present)
 models/
+.venv-llm/
+kaggle_datasets/
+notebooks/agent/build/
+notebooks/agent/submit/

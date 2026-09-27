@@ -1,8 +1,8 @@
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-# Generated single-file agents (agent/my_agent.py, experiments/, eval/champion/) are not linted — agent/brain/ is.
-extend-exclude = ["agent/my_agent.py", "vendor", "reference", "environment_files", ".claude", "experiments", "eval/champion/my_agent.py"]
+# notebooks/duck_repro is a copy of a third-party Kaggle notebook (the template for ours); not linted.
+extend-exclude = ["vendor", "notebooks/duck_repro", "environment_files", ".claude", "models"]
 
 [tool.ruff.lint]
 select = ["E", "F", "C901", "B"]
@@ -10,6 +10,10 @@ select = ["E", "F", "C901", "B"]
 [tool.ruff.lint.mccabe]
 max-complexity = 15
 
-[tool.ruff.lint.per-file-ignores]
-# Upstream starter-kit file; its sys.path setup must precede the framework imports.
-"scripts/play_local.py" = ["E402"]
+[tool.mypy]
+# The "compiler" for the agent (Python written like Java: typed classes, one job per class).
+python_version = "3.12"
+files = ["agent"]
+check_untyped_defs = true
+warn_unused_ignores = true
+ignore_missing_imports = true  # arc_agi / arcengine ship no type stubs
