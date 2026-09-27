@@ -841,7 +841,11 @@ def play_games(arcade: Any, game_ids: list[str], minutes: float, concurrency: in
     llm = LLM(config)
 
     def one(game_id: str) -> None:
-        agent = Agent(Game(arcade.make(game_id, scorecard_id=card), game_id), llm, config,
+        env = arcade.make(game_id, scorecard_id=card)
+        if env is None:  # the arcade could not create it: skip it, the other games go on
+            print(f"[{game_id}] could not be created; skipped", flush=True)
+            return
+        agent = Agent(Game(env, game_id), llm, config,
                     time.time() + minutes * 60, max_actions)
         agent.play()
         print(f"[{game_id}] levels {agent.game.levels}, actions {agent.game.actions_taken}, turns {agent.turn}, "
@@ -864,9 +868,12 @@ def open_arcade(mode: str, environments_dir: str = "environment_files") -> Any:
     import arc_agi
     logging.disable(logging.WARNING)
     if mode == "competition":
+        # an empty folder: with environments_dir="" arc_agi also scans ./environment_files and then lists games the
+        # server does not have (make() returns None for them; found with a local competition-mode server)
         return arc_agi.Arcade(operation_mode=arc_agi.OperationMode.COMPETITION,
                               arc_base_url=os.environ.get("ARC_BASE_URL", "http://gateway:8001/"),
-                              arc_api_key=os.environ.get("ARC_API_KEY", ""), environments_dir="")
+                              arc_api_key=os.environ.get("ARC_API_KEY", ""),
+                              environments_dir=tempfile.mkdtemp(prefix="arc_games_"))
     return arc_agi.Arcade(operation_mode=arc_agi.OperationMode.OFFLINE, environments_dir=environments_dir)
 
 
@@ -881,7 +888,7 @@ def main() -> int:
     ap.add_argument("--out", default="", help="write the per-game results as JSON here")
     args = ap.parse_args()
     arcade = open_arcade(args.mode, args.environments)
-    ids = sorted(e.game_id for e in arcade.available_environments)
+    ids = sorted({e.game_id for e in arcade.available_environments})
     if args.games != "all":
         ids = [i for i in ids if i.split("-")[0] in args.games.split(",")]
     started = time.time()

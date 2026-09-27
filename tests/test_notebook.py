@@ -28,3 +28,11 @@ def test_qwen27b_notebook_attaches_our_wheelhouse_and_the_27b_model(tmp_path):
     _notebook, meta = _build(tmp_path, "--model", "qwen27b")
     assert meta["kernel_sources"] == ["hawkosm/arc3-llm-prep"] and "docker_image" not in meta
     assert meta["model_sources"][0].startswith("michaelpoluektov/qwen3-8-27b-fp8")
+
+
+def test_submission_build_can_keep_its_save_and_run_short(tmp_path):
+    notebook, _meta = _build(tmp_path, "--dev-minutes-per-game", "5")
+    code = "".join("".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code")
+    settings = json.loads(code.split('SETTINGS = json.loads("""', 1)[1].split('"""', 1)[0])
+    assert settings["dev_minutes_per_game"] == 5 and settings["minutes_per_game"] == 130
+    assert 'SETTINGS["minutes_per_game"] if TRUE_SUBMISSION' in code

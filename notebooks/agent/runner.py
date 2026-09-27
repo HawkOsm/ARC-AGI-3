@@ -158,13 +158,16 @@ else:
     games_dir = first("/kaggle/input/**/environment_files")
     assert games_dir is not None, "the public game files are not attached"
     arcade = agent_model.open_arcade("offline", str(games_dir))
-game_ids = sorted(e.game_id for e in arcade.available_environments)
+game_ids = sorted({e.game_id for e in arcade.available_environments})
 if not game_ids:
     raise RuntimeError("the arcade lists no games (competition gateway down, or no game files found)")
 parallel = min(len(game_ids), SETTINGS["max_parallel_games"])
 rounds = math.ceil(len(game_ids) / parallel)
 left_s = NOTEBOOK_LIMIT_S - (time.time() - NOTEBOOK_START) - RESERVE_S
-minutes = min(SETTINGS["minutes_per_game"], left_s / rounds / 60)
+# a submission's own Save & Run only has to finish cleanly: it may use a short play time (dev_minutes_per_game)
+wanted = SETTINGS["minutes_per_game"] if TRUE_SUBMISSION else (SETTINGS["dev_minutes_per_game"]
+                                                               or SETTINGS["minutes_per_game"])
+minutes = min(wanted, left_s / rounds / 60)
 print(f"playing {len(game_ids)} games, {parallel} at once, {minutes:.0f} min each", flush=True)
 results = agent_model.play_games(arcade, game_ids, minutes, parallel, agent_model.Config())
 mean = sum(r["score"] for r in results.values()) / max(1, len(results))

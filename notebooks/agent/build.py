@@ -59,6 +59,9 @@ def main() -> int:
                     help="flashnext: fixed cache size (run A: 5 GiB; 0 = let vLLM size it, risk of OOM)")
     ap.add_argument("--kv-cache-dtype", choices=["auto", "fp8"], default="auto", help="fp8 ~doubles the cache")
     ap.add_argument("--minutes-per-game", type=float, default=130.0)
+    ap.add_argument("--dev-minutes-per-game", type=float, default=0.0,
+                    help="play time in a normal Save & Run only (0 = same as the scored run); a submission's Save & "
+                         "Run just has to finish, e.g. 5 saves ~2 GPU hours")
     ap.add_argument("--max-parallel-games", type=int, default=28)
     ap.add_argument("--screen", choices=["image", "text", "both", "none"], default="image")
     ap.add_argument("--max-tokens", type=int, default=0, help="per reply (0 = no cap, as run A)")
@@ -69,6 +72,7 @@ def main() -> int:
     settings = {"model": args.model, "context": args.context, "prefix_cache": args.prefix_cache,
                 "max_seqs": args.max_seqs, "kv_cache_bytes": args.kv_cache_bytes,
                 "kv_cache_dtype": args.kv_cache_dtype, "minutes_per_game": args.minutes_per_game,
+                "dev_minutes_per_game": args.dev_minutes_per_game,
                 "max_parallel_games": args.max_parallel_games, "screen": args.screen,
                 "max_tokens": args.max_tokens, "thinking": not args.no_thinking,
                 "serving_datasets": SOURCES[args.model]["dataset_sources"]}
