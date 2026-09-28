@@ -4,6 +4,18 @@ See [`README.md`](README.md) for the entry format and convention. Newest first.
 
 ---
 
+## 2026-09-27 — Submission: our agent, Flash-Next, context 12K, 8 requests at once, watchdog (LB 0.89)
+- Change: run D's code plus the competition-mode fix (50d693c) and max-seqs 8 + watchdog (7aac738). Built with
+  `build.py --model flashnext --context 12000 --no-prefix-cache --max-seqs 8 --minutes-per-game 130
+  --dev-minutes-per-game 5 --kernel hawkosm/arc3-agent-submit`; Save & Run clean (1542 s, no OOM, 3 levels in the
+  5-minute dev play). Submitted by the owner (ref 56616846).
+- Result: **public LB 0.89** (previous submission, the v2 floor agent: 0.44; the public Duck fork: ~5; our run A
+  of that fork scored 9.81 in a normal Save & Run).
+- Verdict: WORSE than the public Duck fork by a wide margin. Hidden-set scores are not comparable 1:1 with Save & Run
+  scores, and there is no clean full-length Save & Run of this agent (run D crashed), so the gap cannot yet be
+  split between the agent and the serving. The next measurement to make: our agent and the Duck fork, same
+  notebook settings, full length, both with the watchdog.
+
 ## 2026-09-27 — Kaggle run D: our agent after the interface fixes + old-brain pieces (server crashed mid-run)
 - Change: run C's settings (Flash-Next, context 12K) with prefix cache off, and the agent from 803ddcb (interface
   fixes, step-counter memory, no-op refusal, `changes()`, `memory`). Pushed by the owner (`hawkosm/arc3-agent` v2).
